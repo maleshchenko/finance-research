@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Optional
 
 import structlog
-from langchain_openai import OpenAIEmbeddings
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -37,6 +36,7 @@ from app.database.models import (
 )
 from app.ingestion.chunker import chunk_document
 from app.ingestion.extractor import extract_pdf
+from app.llm import make_embeddings
 
 log = structlog.get_logger(__name__)
 
@@ -102,10 +102,7 @@ async def ingest_document(
     texts = [c.content for c in chunks]
 
     # ── 4. Embed (batched to respect rate limits) ─────────────────────────────
-    embeddings_model = OpenAIEmbeddings(
-        model=settings.openai_embedding_model,
-        openai_api_key=settings.openai_api_key,
-    )
+    embeddings_model = make_embeddings()
     BATCH_SIZE = 100
     all_embeddings: list[list[float]] = []
     for i in range(0, len(texts), BATCH_SIZE):

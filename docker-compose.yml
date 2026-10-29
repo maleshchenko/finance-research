@@ -18,6 +18,26 @@ services:
       timeout: 5s
       retries: 10
 
+  # ── Ollama (local LLM — optional, only needed when LLM_PROVIDER=ollama) ──
+  # Start with:  docker compose --profile ollama up
+  # Pull models: docker compose exec ollama ollama pull llama3.2
+  #              docker compose exec ollama ollama pull nomic-embed-text
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # GPU support (uncomment if your host has NVIDIA drivers + container toolkit)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
   # ── Migrations (runs once, then exits) ────────────────────────────────────
   migrate:
     build: .
@@ -36,9 +56,16 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: "postgresql+asyncpg://user:password@db:5432/financial_research"
-      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      # OpenAI (default)
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o}"
       OPENAI_EMBEDDING_MODEL: "${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}"
+      # Ollama — set LLM_PROVIDER=ollama and point at the companion service
+      LLM_PROVIDER: "${LLM_PROVIDER:-openai}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-llama3.2}"
+      OLLAMA_EMBEDDING_MODEL: "${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}"
+      VECTOR_DIMENSION: "${VECTOR_DIMENSION:-1536}"
     depends_on:
       db:
         condition: service_healthy
@@ -57,3 +84,4 @@ services:
 
 volumes:
   postgres_data:
+  ollama_data:

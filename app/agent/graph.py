@@ -39,13 +39,13 @@ from typing import Annotated, Any, Literal, Optional, TypedDict
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.tools import build_tools
 from app.config import settings
+from app.llm import make_llm
 from app.prompts.system import CLASSIFIER_PROMPT, SYSTEM_PROMPT, SYNTHESIS_PROMPT
 
 log = structlog.get_logger(__name__)
@@ -68,12 +68,8 @@ class AgentState(TypedDict):
 
 # ── LLM instances ─────────────────────────────────────────────────────────────
 
-def _make_llm(temperature: float = settings.agent_temperature) -> ChatOpenAI:
-    return ChatOpenAI(
-        model=settings.openai_model,
-        temperature=temperature,
-        api_key=settings.openai_api_key,
-    )
+def _make_llm(temperature: float = settings.agent_temperature):
+    return make_llm(temperature=temperature)
 
 
 # ── Node implementations ──────────────────────────────────────────────────────

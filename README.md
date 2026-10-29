@@ -27,9 +27,11 @@ The LLM never guesses numerical values. It retrieves or calculates them, then sy
 
 ## Quick start
 
+### With OpenAI
+
 ```bash
 # 1. Copy env and add your OpenAI key
-cp .env.example .env
+cp .env.example .env          # set OPENAI_API_KEY=sk-...
 
 # 2. Start the stack (applies migrations on boot)
 docker compose up --build
@@ -43,6 +45,31 @@ curl -s -X POST http://localhost:8000/research/query \
   -d '{"question": "Compare operating margins for AAPL, MSFT, and GOOGL across FY2023"}' \
   | jq .answer
 ```
+
+### With Ollama (fully local, no API key)
+
+```bash
+# 1. Pull the models (one-time)
+ollama pull llama3.2
+ollama pull nomic-embed-text
+
+# 2. Configure
+cp .env.example .env
+# Edit .env:
+#   LLM_PROVIDER=ollama
+#   OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+#   VECTOR_DIMENSION=768       # nomic-embed-text produces 768-dim vectors
+
+# 3. Start the stack (Ollama runs as a sidecar)
+docker compose --profile ollama up --build
+
+# 4. Same seed + query commands as above
+```
+
+> **Note on embedding dimensions:** the `VECTOR_DIMENSION` setting must match
+> the embedding model and must be set **before** the first `alembic upgrade head`
+> — pgvector columns are fixed-width. If you need to change it later, drop and
+> recreate the database.
 
 Interactive API docs: **http://localhost:8000/docs**
 
