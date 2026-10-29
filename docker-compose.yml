@@ -18,6 +18,17 @@ services:
       timeout: 5s
       retries: 10
 
+  # ── Migrations (runs once, then exits) ────────────────────────────────────
+  migrate:
+    build: .
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://user:password@db:5432/financial_research"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: alembic upgrade head
+    restart: "no"
+
   # ── FastAPI application ────────────────────────────────────────────────────
   api:
     build: .
@@ -31,10 +42,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ./sample_docs:/app/sample_docs:ro
-    command: >
-      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     develop:
       watch:
         - action: sync

@@ -67,8 +67,8 @@ app/
   api/routes/     POST /ingest/upload, POST /research/query, GET /documents/…
   database/       SQLAlchemy models, Alembic migrations
 scripts/
-  seed_demo.py    generate and ingest synthetic reports
-tests/            unit tests (no DB or API key required)
+  seed_demo.py    Generate and ingest synthetic reports
+tests/            30 unit tests (no DB or API key required)
 ```
 
 ## Citation format

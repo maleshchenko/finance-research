@@ -50,6 +50,7 @@ class DocumentMetadata:
     fiscal_quarter: Optional[int] = None
     period_end_date: Optional[datetime] = None
     filing_date: Optional[datetime] = None
+    source_uri: Optional[str] = None          # s3:// URI or original filename
     extra_metadata: Optional[dict] = None
 
 

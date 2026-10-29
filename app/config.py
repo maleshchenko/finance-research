@@ -1,6 +1,6 @@
 """Application configuration loaded from environment variables."""
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,8 +14,25 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "postgresql+asyncpg://user:password@localhost:5432/financial_research"
-    database_pool_size: int = 10
-    database_max_overflow: int = 20
+    database_pool_size: int = 5   # keep low — multiply by replica count
+    database_max_overflow: int = 5
+
+    # S3 (optional — if set, PDFs are stored in S3 instead of local temp files)
+    s3_bucket: str = Field(default="")
+    aws_region: str = Field(default="us-east-1")
+
+    # CORS — comma-separated list; use "*" only in local dev
+    cors_allowed_origins: str = Field(default="http://localhost:3000,http://localhost:8080")
+
+    @field_validator("openai_api_key")
+    @classmethod
+    def openai_key_must_be_set(cls, v: str) -> str:
+        if not v or not v.startswith("sk-"):
+            raise ValueError(
+                "OPENAI_API_KEY is required and must start with 'sk-'. "
+                "Copy .env.example to .env and fill it in."
+            )
+        return v
 
     # Vector store
     vector_dimension: int = 1536

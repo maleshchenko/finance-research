@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import tempfile
+import uuid
 from pathlib import Path
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +17,31 @@ from app.database.models import DocumentType
 from app.database.session import get_db
 from app.ingestion.pipeline import DocumentMetadata, ingest_document
 
+log = structlog.get_logger(__name__)
+
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
+
+
+def _s3_upload(content: bytes, filename: str) -> str:
+    """
+    Upload PDF bytes to S3 and return the s3:// URI.
+
+    Requires `boto3` and a bucket configured via S3_BUCKET env var.
+    If S3_BUCKET is not set this function is never called.
+    """
+    import boto3  # lazy import — only needed when S3 is configured
+
+    key = f"uploads/{uuid.uuid4().hex}/{filename}"
+    client = boto3.client("s3", region_name=settings.aws_region)
+    client.upload_fileobj(
+        io.BytesIO(content),
+        settings.s3_bucket,
+        key,
+        ExtraArgs={"ContentType": "application/pdf"},
+    )
+    s3_uri = f"s3://{settings.s3_bucket}/{key}"
+    log.info("s3_upload_ok", key=key, bytes=len(content))
+    return s3_uri
 
 
 @router.post("/upload", response_model=IngestResponse, status_code=201)
@@ -30,8 +57,9 @@ async def upload_document(
     """
     Upload a PDF financial document and ingest it into the knowledge base.
 
-    The file is streamed to a temporary location, extracted, chunked,
-    embedded, and stored. Structured metrics are extracted automatically.
+    The file is streamed to a temporary location (or to S3 when S3_BUCKET is
+    set), extracted, chunked, embedded, and stored.  Structured metrics are
+    extracted automatically.
 
     Accepts: PDF files up to `MAX_UPLOAD_SIZE_MB` MB.
     """
@@ -58,7 +86,16 @@ async def upload_document(
             detail=f"Invalid document_type. Valid values: {valid}",
         )
 
-    # Write to temp file and run pipeline
+    # Optionally upload the original PDF to S3 for durable storage
+    s3_uri: str | None = None
+    if settings.s3_bucket:
+        try:
+            s3_uri = _s3_upload(content, file.filename)
+        except Exception as exc:
+            # S3 failure is non-fatal: we still ingest from the temp copy
+            log.warning("s3_upload_failed", error=str(exc))
+
+    # Write to temp file and run ingestion pipeline
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(content)
         tmp_path = Path(tmp.name)
@@ -70,6 +107,7 @@ async def upload_document(
             document_type=doc_type,
             fiscal_year=fiscal_year,
             fiscal_quarter=fiscal_quarter,
+            source_uri=s3_uri or file.filename,
         )
         result = await ingest_document(db, tmp_path, metadata)
     finally:
