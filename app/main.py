@@ -14,12 +14,13 @@ import sys
 import time
 from contextlib import asynccontextmanager
 
+import asyncio
+
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from starlette.middleware.timeout import TimeoutMiddleware
 
 from app.api.routes import documents, ingest, research
 from app.config import settings
@@ -38,7 +39,6 @@ def _configure_logging() -> None:
 
     processors: list = [
         structlog.stdlib.add_log_level,
-        structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
@@ -93,9 +93,6 @@ app = FastAPI(
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 
-# Hard timeout: LLM calls can be slow; 120s matches the ALB idle timeout
-app.add_middleware(TimeoutMiddleware, timeout=120)
-
 # CORS: read allowed origins from env so prod and dev can differ
 _cors_origins = [o.strip() for o in settings.cors_allowed_origins.split(",") if o.strip()]
 app.add_middleware(
@@ -107,10 +104,21 @@ app.add_middleware(
 )
 
 
+_REQUEST_TIMEOUT = 120  # seconds — matches ALB idle timeout
+
+
 @app.middleware("http")
-async def add_timing_header(request: Request, call_next):
+async def timing_and_timeout(request: Request, call_next):
     t0 = time.perf_counter()
-    response = await call_next(request)
+    try:
+        response = await asyncio.wait_for(call_next(request), timeout=_REQUEST_TIMEOUT)
+    except asyncio.TimeoutError:
+        elapsed = round((time.perf_counter() - t0) * 1000)
+        log.warning("request_timeout", path=request.url.path, ms=elapsed)
+        return JSONResponse(
+            status_code=504,
+            content={"detail": f"Request timed out after {_REQUEST_TIMEOUT}s."},
+        )
     elapsed = round((time.perf_counter() - t0) * 1000)
     response.headers["X-Response-Time-Ms"] = str(elapsed)
     log.info(

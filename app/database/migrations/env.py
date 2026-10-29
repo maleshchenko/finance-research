@@ -1,6 +1,7 @@
 """Alembic environment — async-aware migration runner."""
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -8,11 +9,20 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from app.config import settings
 from app.database.models import Base
 
+# ── Resolve the database URL ──────────────────────────────────────────────────
+# Read straight from the environment; fall back to the docker-compose default.
+_async_url: str = os.environ.get(
+    "DATABASE_URL",
+    "postgresql+asyncpg://user:password@localhost:5432/financial_research",
+)
+# Alembic's offline mode needs a synchronous driver
+_sync_url: str = _async_url.replace("+asyncpg", "+psycopg2")
+
+# ── Alembic config ────────────────────────────────────────────────────────────
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.sync_database_url)
+config.set_main_option("sqlalchemy.url", _sync_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -20,9 +30,11 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+# ── Migration runners ─────────────────────────────────────────────────────────
+
 def run_migrations_offline() -> None:
     context.configure(
-        url=settings.sync_database_url,
+        url=_sync_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -39,7 +51,7 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     async_engine = async_engine_from_config(
-        {"sqlalchemy.url": settings.database_url},
+        {"sqlalchemy.url": _async_url},
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
