@@ -1,0 +1,47 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL with pgvector ───────────────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: financial_research
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d financial_research"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── FastAPI application ────────────────────────────────────────────────────
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://user:password@db:5432/financial_research"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o}"
+      OPENAI_EMBEDDING_MODEL: "${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./sample_docs:/app/sample_docs:ro
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    develop:
+      watch:
+        - action: sync
+          path: ./app
+          target: /app/app
+        - action: rebuild
+          path: pyproject.toml
+
+volumes:
+  postgres_data:
