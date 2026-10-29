@@ -98,6 +98,22 @@ scripts/
 tests/            30 unit tests (no DB or API key required)
 ```
 
+## Web search fallback
+
+When the agent exhausts local retrieval (no documents ingested for that company/period), it can fall back to a live web search, disabled by default.
+
+```bash
+# .env
+WEB_SEARCH_ENABLED=true
+
+# Tavily (recommended — finance-aware result ranking, free tier available)
+TAVILY_API_KEY=tvly-...
+
+# DuckDuckGo is used automatically if TAVILY_API_KEY is not set (no key needed)
+```
+
+The agent only triggers web search after confirming via `list_documents` that local data is absent. Web-sourced claims are always cited as `[WEB: <url>]` and flagged as less authoritative than ingested filings.
+
 ## Citation format
 
 Every factual claim in an answer is tagged:

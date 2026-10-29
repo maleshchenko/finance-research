@@ -1,13 +1,14 @@
 """
 LangChain tools surfaced to the LangGraph agent.
 
-Five tools implement the hybrid retrieval strategy:
+Six tools implement the hybrid retrieval strategy:
 
   1. retrieve_narrative  — semantic search over document chunks (RAG)
   2. query_metrics       — structured SQL query for numerical time series
   3. calculate           — Python calculations on returned metric series
   4. list_documents      — discover what's in the database
   5. list_metrics        — discover which metrics exist for a company
+  6. web_search          — last-resort web search when local data is absent
 
 Each tool returns a JSON-serialisable dict so the LLM can inspect values
 and the API can include them in the citation trail.
@@ -296,14 +297,101 @@ def build_list_metrics_tool(db: AsyncSession):
     return list_metrics
 
 
+# ── Tool 6: Web search (last resort) ─────────────────────────────────────────
+
+@tool
+async def web_search(
+    query: Annotated[str, "Search query — be specific, include company name and year"],
+    max_results: Annotated[int, "Maximum results to return (1-5)"] = 3,
+) -> str:
+    """
+    Search the public web for financial information as a LAST RESORT.
+
+    ONLY use this tool when:
+      - retrieve_narrative returned zero results, AND
+      - query_metrics returned no rows, AND
+      - list_documents confirms the company/period is absent from the knowledge base.
+
+    Do NOT use this for general knowledge questions you can answer without search.
+    All results must be cited as [WEB: <url>] in the final answer.
+
+    Uses Tavily (if TAVILY_API_KEY is set) for quality-ranked results, or falls
+    back to DuckDuckGo when no key is configured.
+    """
+    from app.config import settings
+
+    if not settings.web_search_enabled:
+        return json.dumps({
+            "error": "Web search is disabled. Set WEB_SEARCH_ENABLED=true to enable it.",
+            "results": [],
+        })
+
+    results: list[dict[str, str]] = []
+
+    # ── Tavily (preferred, finance-aware ranking, returns snippets) ──────────
+    if settings.tavily_api_key:
+        try:
+            from tavily import TavilyClient  # type: ignore[import]
+            client = TavilyClient(api_key=settings.tavily_api_key)
+            response = client.search(
+                query=query,
+                max_results=max_results,
+                search_depth="advanced",
+                include_domains=["sec.gov", "investor.apple.com", "ir.aboutamazon.com",
+                                 "reuters.com", "bloomberg.com", "ft.com",
+                                 "wsj.com", "cnbc.com", "finance.yahoo.com"],
+            )
+            results = [
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("url", ""),
+                    "snippet": r.get("content", "")[:500],
+                    "score": str(round(r.get("score", 0), 3)),
+                    "source": "tavily",
+                }
+                for r in response.get("results", [])
+            ]
+            log.info("web_search_tavily", query=query, hits=len(results))
+            return json.dumps({"results": results, "query": query}, ensure_ascii=False)
+        except Exception as exc:
+            log.warning("tavily_search_failed", error=str(exc))
+            # Fall through to DuckDuckGo
+
+    # ── DuckDuckGo fallback (no API key required) ─────────────────────────────
+    try:
+        from duckduckgo_search import DDGS  # type: ignore[import]
+        with DDGS() as ddgs:
+            raw = list(ddgs.text(query, max_results=max_results))
+        results = [
+            {
+                "title": r.get("title", ""),
+                "url": r.get("href", ""),
+                "snippet": r.get("body", "")[:500],
+                "source": "duckduckgo",
+            }
+            for r in raw
+        ]
+        log.info("web_search_ddg", query=query, hits=len(results))
+    except Exception as exc:
+        log.error("web_search_failed", error=str(exc))
+        return json.dumps({"error": str(exc), "results": []})
+
+    return json.dumps({"results": results, "query": query}, ensure_ascii=False)
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 def build_tools(db: AsyncSession) -> list:
     """Return all agent tools bound to the given DB session."""
-    return [
+    from app.config import settings
+
+    tools = [
         build_retrieve_narrative_tool(db),
         build_query_metrics_tool(db),
         calculate,
         build_list_documents_tool(db),
         build_list_metrics_tool(db),
     ]
+    if settings.web_search_enabled:
+        tools.append(web_search)
+    return tools

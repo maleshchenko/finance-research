@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     s3_bucket: str = Field(default="")
     aws_region: str = Field(default="us-east-1")
 
+    # ── Web search (last-resort fallback) ──────────────────────────────────────
+    # Set WEB_SEARCH_ENABLED=true to allow the agent to query the web when
+    # local retrieval returns nothing.
+    # Tavily (recommended): get a free key at https://app.tavily.com
+    # DuckDuckGo is used automatically when no Tavily key is provided.
+    web_search_enabled: bool = False
+    tavily_api_key: str = Field(default="")
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     cors_allowed_origins: str = Field(default="http://localhost:3000,http://localhost:8080")
 
