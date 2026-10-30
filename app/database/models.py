@@ -65,7 +65,9 @@ class Document(Base):
     company_ticker: Mapped[Optional[str]] = mapped_column(String(20), index=True)
     company_name: Mapped[Optional[str]] = mapped_column(String(200))
     document_type: Mapped[DocumentType] = mapped_column(
-        Enum(DocumentType), nullable=False, index=True
+        Enum(DocumentType, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+        index=True,
     )
     fiscal_year: Mapped[Optional[int]] = mapped_column(Integer, index=True)
     fiscal_quarter: Mapped[Optional[int]] = mapped_column(Integer)  # 1-4 or None
@@ -166,7 +168,8 @@ class FinancialMetric(Base):
     period_end_date: Mapped[Optional[datetime]] = mapped_column(DateTime)
     metric_name: Mapped[str] = mapped_column(String(200), nullable=False)
     metric_category: Mapped[MetricCategory] = mapped_column(
-        Enum(MetricCategory), nullable=False
+        Enum(MetricCategory, values_callable=lambda e: [m.value for m in e]),
+        nullable=False
     )
     value: Mapped[float] = mapped_column(Float, nullable=False)
     unit: Mapped[Optional[str]] = mapped_column(String(50))   # "USD_millions", "percent", etc.

@@ -1,5 +1,5 @@
 """
-Demo seed script — generates synthetic financial reports and ingests them.
+Demo seed script, generates synthetic financial reports and ingests them.
 
 This lets you run the assistant end-to-end without real SEC filings.
 
@@ -15,13 +15,12 @@ from __future__ import annotations
 import asyncio
 import io
 import random
-from datetime import date
 
 import httpx
 
 BASE_URL = "http://localhost:8000"
 
-# Synthetic financial data — loosely inspired by public figures
+# Synthetic financial data, loosely inspired by public figures
 COMPANIES = {
     "AAPL": {
         "name": "Apple Inc.",
@@ -49,136 +48,107 @@ COMPANIES = {
 
 def _make_fake_pdf(ticker: str, quarter: int, year: int = 2023) -> bytes:
     """
-    Build a minimal but realistic-looking PDF text using reportlab-like structure.
-    We use fpdf2 if available, otherwise create a raw minimal PDF.
+    Build a valid PDF containing synthetic financial data.
+
+    Uses stdlib (io.BytesIO).
+    Text is written as hex strings inside the PDF content stream so there are
+    no literal-string escaping issues whatsoever.
+    Both pdfplumber and pdfminer can extract the text without any trouble.
     """
-    try:
-        from fpdf import FPDF
+    data = COMPANIES[ticker]
+    q_idx = quarter - 1
+    rev = data["revenue"][q_idx]
+    op = data["op_income"][q_idx]
+    net = data["net_income"][q_idx]
+    eps = data["eps"][q_idx]
+    op_margin = round(op / rev * 100, 1)
+    prev_rev = data["revenue"][q_idx - 1] if q_idx > 0 else rev * 0.9
+    yoy_growth = round((rev - prev_rev) / prev_rev * 100, 1)
+    fwd_rev = rev * random.uniform(1.03, 1.08)
+    direction = "growth" if yoy_growth >= 0 else "a decline"
 
-        data = COMPANIES[ticker]
-        q_idx = quarter - 1
-        rev = data["revenue"][q_idx]
-        op = data["op_income"][q_idx]
-        net = data["net_income"][q_idx]
-        eps = data["eps"][q_idx]
-        op_margin = round(op / rev * 100, 1)
-        prev_rev = data["revenue"][q_idx - 1] if q_idx > 0 else rev * 0.9
-        yoy_growth = round((rev - prev_rev) / prev_rev * 100, 1)
+    lines = [
+        f"{ticker} {data['name']}",
+        f"Q{quarter} FY{year} Quarterly Report",
+        "",
+        "CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS",
+        "in millions except per share data",
+        "",
+        f"                   Q{quarter} FY{year}    Q{quarter} FY{year - 1}",
+        f"Total Revenue      {rev:>12,.0f}    {int(rev * 0.88):>12,.0f}",
+        f"Operating Income   {op:>12,.0f}    {int(op * 0.82):>12,.0f}",
+        f"Operating Margin   {op_margin:>11.1f}%   {op_margin - 1.2:>11.1f}%",
+        f"Net Income         {net:>12,.0f}    {int(net * 0.84):>12,.0f}",
+        f"Diluted EPS        {eps:>12.2f}    {eps * 0.84:>12.2f}",
+        "",
+        "Management Discussion and Analysis",
+        "",
+        f"Revenue for Q{quarter} FY{year} was {rev / 1000:.1f} billion, representing",
+        f"{direction} of {abs(yoy_growth):.1f}% year-over-year.",
+        f"Operating income of {op / 1000:.1f} billion reflects an operating margin",
+        f"of {op_margin:.1f}%, compared to {op_margin - 1.2:.1f}% in the prior-year period.",
+        f"Net income was {net / 1000:.1f} billion with diluted EPS of {eps:.2f}.",
+        "",
+        "Forward-Looking Statements and Guidance",
+        "",
+        "For the upcoming quarter, management expects revenue in the range of",
+        f"{fwd_rev * 0.98 / 1000:.1f} billion to {fwd_rev * 1.02 / 1000:.1f} billion.",
+        f"Gross margin is expected to be approximately {op_margin - 2:.0f}% to {op_margin:.0f}%.",
+        "This guidance reflects current expectations and is subject to risks.",
+    ]
 
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Helvetica", "B", 16)
-        pdf.cell(0, 10, f"{data['name']} ({ticker})", ln=True)
-        pdf.cell(0, 10, f"Q{quarter} FY{year} Earnings Release", ln=True)
-        pdf.ln(5)
+    # Encode each line as a PDF hex string: <hexbytes>
+    # This completely sidesteps all literal-string escaping rules.
+    def hex_str(text: str) -> bytes:
+        return b"<" + text.encode("latin-1", errors="replace").hex().upper().encode() + b">"
 
-        pdf.set_font("Helvetica", "", 11)
-        pdf.cell(0, 8, f"Quarter ended: March 31, {year}", ln=True)
-        pdf.ln(5)
+    # PDF content stream: BT … ET with 14-point leading
+    stream_cmds = [b"BT", b"/F1 10 Tf", b"50 750 Td", b"14 TL"]
+    for line in lines:
+        stream_cmds.append(hex_str(line) + b" Tj T*")
+    stream_cmds.append(b"ET")
+    stream = b"\n".join(stream_cmds)
 
-        # Income Statement Table
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, "CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS", ln=True)
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(80, 7, "")
-        pdf.cell(40, 7, f"Q{quarter} FY{year}", align="R")
-        pdf.cell(40, 7, f"Q{quarter} FY{year-1}", align="R", ln=True)
+    # Build the PDF byte-by-byte, tracking exact offsets for the xref table.
+    buf = io.BytesIO()
 
-        rows = [
-            ("Total Revenue", f"{rev:,.0f}", f"{int(rev*0.88):,.0f}"),
-            ("Gross Profit", f"{int(rev*0.43):,.0f}", f"{int(rev*0.42):,.0f}"),
-            ("Operating Income", f"{op:,.0f}", f"{int(op*0.82):,.0f}"),
-            ("Operating Margin", f"{op_margin}%", f"{op_margin-1.2}%"),
-            ("Net Income", f"{net:,.0f}", f"{int(net*0.84):,.0f}"),
-            ("Diluted EPS", f"${eps:.2f}", f"${eps*0.84:.2f}"),
-        ]
-        for label, current, prior in rows:
-            pdf.cell(80, 6, label)
-            pdf.cell(40, 6, current, align="R")
-            pdf.cell(40, 6, prior, align="R", ln=True)
+    buf.write(b"%PDF-1.4\n")
 
-        # MD&A section
-        pdf.ln(5)
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, "Management's Discussion and Analysis", ln=True)
-        pdf.set_font("Helvetica", "", 10)
-        commentary = (
-            f"Revenue for Q{quarter} FY{year} was ${rev/1000:.1f} billion, representing "
-            f"{'growth' if yoy_growth >= 0 else 'a decline'} of {abs(yoy_growth):.1f}% "
-            f"year-over-year. Operating income of ${op/1000:.1f} billion reflects an "
-            f"operating margin of {op_margin}%, compared to {op_margin - 1.2}% in the "
-            f"prior-year period. The improvement was driven by continued operational "
-            f"efficiency and favorable product mix. "
-        )
-        pdf.multi_cell(0, 6, commentary)
+    offsets: dict[int, int] = {}
 
-        # Forward guidance section
-        pdf.ln(3)
-        pdf.set_font("Helvetica", "B", 11)
-        pdf.cell(0, 8, "Forward-Looking Statements and Guidance", ln=True)
-        pdf.set_font("Helvetica", "", 10)
-        fwd_rev = rev * random.uniform(1.03, 1.08)
-        guidance = (
-            f"For the upcoming quarter, management expects revenue in the range of "
-            f"${fwd_rev*0.98/1000:.1f} billion to ${fwd_rev*1.02/1000:.1f} billion. "
-            f"Gross margin is expected to be approximately {op_margin - 2:.0f}% to "
-            f"{op_margin:.0f}%. This guidance reflects management's current expectations "
-            f"and is subject to risks and uncertainties. "
-        )
-        pdf.multi_cell(0, 6, guidance)
+    offsets[1] = buf.tell()
+    buf.write(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
 
-        return bytes(pdf.output())
+    offsets[2] = buf.tell()
+    buf.write(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
 
-    except ImportError:
-        # Minimal valid PDF without fpdf2
-        content = f"""\
-{ticker} {data['name']}
-Q{quarter} FY{year} Quarterly Report
+    offsets[3] = buf.tell()
+    buf.write(
+        b"3 0 obj\n"
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
+        b" /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\n"
+        b"endobj\n"
+    )
 
-CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS
-(in millions, except per share data)
+    offsets[4] = buf.tell()
+    buf.write(b"4 0 obj\n<< /Length " + str(len(stream)).encode() + b" >>\nstream\n")
+    buf.write(stream)
+    buf.write(b"\nendstream\nendobj\n")
 
-                        Q{quarter} FY{year}    Q{quarter} FY{year-1}
-Total Revenue           {rev:>10,.0f}    {int(rev*0.88):>10,.0f}
-Operating Income        {op:>10,.0f}    {int(op*0.82):>10,.0f}
-Operating Margin        {op_margin:>9.1f}%   {op_margin-1.2:>9.1f}%
-Net Income              {net:>10,.0f}    {int(net*0.84):>10,.0f}
-Diluted EPS             {eps:>10.2f}    {eps*0.84:>10.2f}
+    offsets[5] = buf.tell()
+    buf.write(b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n")
 
-Management's Discussion and Analysis
+    # Cross-reference table (each entry is exactly 20 bytes: 10+1+5+1+1+1+\n)
+    xref_pos = buf.tell()
+    buf.write(b"xref\n0 6\n")
+    buf.write(b"0000000000 65535 f \n")  # object 0, always free
+    for i in range(1, 6):
+        buf.write(f"{offsets[i]:010d} 00000 n \n".encode())
 
-Revenue for Q{quarter} FY{year} was ${rev/1000:.1f} billion, representing
-{'growth' if yoy_growth >= 0 else 'a decline'} of {abs(yoy_growth):.1f}% year-over-year.
-Operating income of ${op/1000:.1f} billion reflects an operating margin
-of {op_margin}%, compared to {op_margin - 1.2}% in the prior-year period.
+    buf.write(b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n")
+    buf.write(str(xref_pos).encode() + b"\n%%EOF\n")
 
-Forward-Looking Statements and Guidance
-
-For the upcoming quarter, management expects revenue in the range of
-${fwd_rev*0.98/1000:.1f} billion to ${fwd_rev*1.02/1000:.1f} billion.
-""".encode()
-        # Wrap in minimal PDF structure
-        objects = []
-        objects.append(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
-        objects.append(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
-        objects.append(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n")
-        stream = b"BT /F1 10 Tf 50 750 Td (" + content[:200].replace(b"\n", b" ") + b") Tj ET"
-        objects.append(b"4 0 obj\n<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream\nendobj\n")
-        objects.append(b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
-
-        offsets = []
-        body = b"%PDF-1.4\n"
-        for obj in objects:
-            offsets.append(len(body))
-            body += obj
-
-        xref_offset = len(body)
-        xref = b"xref\n0 " + str(len(objects) + 1).encode() + b"\n0000000000 65535 f \n"
-        for off in offsets:
-            xref += f"{off:010d} 00000 n \n".encode()
-        body += xref
-        body += b"trailer\n<< /Size " + str(len(objects) + 1).encode() + b" /Root 1 0 R >>\nstartxref\n" + str(xref_offset).encode() + b"\n%%EOF\n"
-        return body
+    return buf.getvalue()
 
 
 async def seed():
