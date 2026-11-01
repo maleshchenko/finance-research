@@ -17,12 +17,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 import structlog
-from langchain_openai import OpenAIEmbeddings
 from sqlalchemy import and_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.models import Document, DocumentChunk, DocumentType
+from app.llm import make_embeddings
 
 log = structlog.get_logger(__name__)
 
@@ -79,10 +79,7 @@ class VectorRetriever:
     """
 
     def __init__(self) -> None:
-        self._embeddings = OpenAIEmbeddings(
-            model=settings.openai_embedding_model,
-            openai_api_key=settings.openai_api_key,
-        )
+        self._embeddings = make_embeddings()
 
     async def retrieve(
         self,
@@ -116,9 +113,11 @@ class VectorRetriever:
             conditions.append(Document.fiscal_quarter == filters.fiscal_quarter)
 
         # Cosine similarity = 1 - cosine_distance
-        similarity_expr = text(
-            f"1 - (embedding <=> CAST(:embedding AS vector))"
-        ).bindparams(embedding=embedding_str)
+        # Use literal_column so SQLAlchemy can call .label() and .desc() on it
+        from sqlalchemy import literal_column
+        similarity_expr = literal_column(
+            f"1 - (embedding <=> CAST('{embedding_str}' AS vector))"
+        )
 
         stmt = (
             select(

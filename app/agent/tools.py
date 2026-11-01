@@ -95,6 +95,11 @@ def build_retrieve_narrative_tool(db: AsyncSession):
 
 # ── Tool 2: Structured metric query ──────────────────────────────────────────
 
+def _to_int_or_none(v):
+    if v is None or str(v).strip().lower() in ("none", "null", ""):
+        return None
+    return int(v)
+
 def build_query_metrics_tool(db: AsyncSession):
 
     @tool
@@ -120,13 +125,9 @@ def build_query_metrics_tool(db: AsyncSession):
         Returns a JSON list of metric records with period labels.
         """
 
-	    # Coerce string inputs the LLM sometimes passes
-        if fiscal_quarter is not None:
-            fiscal_quarter = int(fiscal_quarter)
-        if fiscal_year_min is not None:
-            fiscal_year_min = int(fiscal_year_min)
-        if fiscal_year_max is not None:
-            fiscal_year_max = int(fiscal_year_max)	
+        fiscal_quarter = _to_int_or_none(fiscal_quarter)
+        fiscal_year_min = _to_int_or_none(fiscal_year_min)
+        fiscal_year_max = _to_int_or_none(fiscal_year_max)
 
         records = await _metric_store.query_metric_series(
             db,
@@ -150,6 +151,17 @@ def build_query_metrics_tool(db: AsyncSession):
             }
             for r in records
         ]
+
+        if not results:
+            return json.dumps({
+                "results": [],
+                "message": (
+                    "No structured metrics found in the database for this query. "
+                    "IMPORTANT: You must now call the search_documents tool to find "
+                    "this information in the document text instead."
+                )
+            }, ensure_ascii=False)
+        
         return json.dumps(results, ensure_ascii=False)
 
     return query_metrics

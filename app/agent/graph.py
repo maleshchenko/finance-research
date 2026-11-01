@@ -7,41 +7,32 @@ Graph topology:
 │  user_question                                          │
 │       │                                                 │
 │       ▼                                                 │
-│  classify_query ──► DISCOVERY ──► list_tools ──┐        │
-│       │                                        │        │
-│       ├── NARRATIVE ──────────────────────────►│        │
-│       ├── METRICS ────────────────────────────►│        │
-│       └── HYBRID ─────────────────────────────►│        │
-│                                                │        │
-│                                                ▼        │
-│                                    agent_loop           │
-│                                   (ReAct cycle)         │
-│                                        │                │
-│                                        ▼                │
-│                                   synthesise            │
-│                                        │                │
-│                                        ▼                │
-│                                    END (answer)         │
+│  classify_query                                         │
+│       │                                                 │
+│       ▼                                                 │
+│  agent_loop  (pre-fetches RAG, then ReAct)              │
+│       │                                                 │
+│       ▼                                                 │
+│  synthesise                                             │
+│       │                                                 │
+│       ▼                                                 │
+│  END (answer)                                           │
 └─────────────────────────────────────────────────────────┘
-
-The `agent_loop` node uses a standard ReAct pattern via LangChain's
-`create_react_agent`. The graph wraps it with:
-  - classification (routes to right tool set emphasis)
-  - synthesis (post-processes tool calls into a cited answer)
-  - token + iteration guards
 """
 
 from __future__ import annotations
 
 import json
 import time
-from typing import Annotated, Any, Literal, Optional, TypedDict
+from typing import Any, Optional
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import TypedDict
 
 from app.agent.tools import build_tools
 from app.config import settings
@@ -58,7 +49,7 @@ class AgentState(TypedDict):
     classification: Optional[str]
     messages: list[BaseMessage]
     tool_calls_made: list[str]
-    evidence: list[dict[str, Any]]          # raw tool outputs accumulated
+    evidence: list[dict[str, Any]]
     calculations: list[dict[str, Any]]
     answer: Optional[str]
     citations: list[str]
@@ -66,21 +57,15 @@ class AgentState(TypedDict):
     start_time: float
 
 
-# ── LLM instances ─────────────────────────────────────────────────────────────
+# ── LLM factory ───────────────────────────────────────────────────────────────
 
 def _make_llm(temperature: float = settings.agent_temperature):
     return make_llm(temperature=temperature)
 
 
-# ── Node implementations ──────────────────────────────────────────────────────
+# ── Node: classify ────────────────────────────────────────────────────────────
 
 async def classify_query(state: AgentState) -> AgentState:
-    """
-    Classify the question into NARRATIVE / METRICS / HYBRID / DISCOVERY.
-
-    This lets the synthesiser know what kind of evidence to emphasise and
-    helps during debugging (logged classification is visible in query_logs).
-    """
     llm = _make_llm(temperature=0.0)
     prompt = CLASSIFIER_PROMPT.format(question=state["question"])
     response = await llm.ainvoke([HumanMessage(content=prompt)])
@@ -94,39 +79,69 @@ async def classify_query(state: AgentState) -> AgentState:
     return {**state, "classification": classification}
 
 
+# ── Node: agent ───────────────────────────────────────────────────────────────
+
 async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     """
-    Run the ReAct agent loop via LangGraph's prebuilt `create_react_agent`.
-
-    The agent has access to all five tools and will call them in whatever
-    order it deems necessary. We cap at `settings.agent_max_iterations`.
+    1. Pre-fetch RAG results directly (don't rely on the LLM to call the tool).
+    2. Inject them into the prompt so the model always has evidence.
+    3. Run the ReAct agent for any additional tool calls.
     """
-    llm = _make_llm()
     tools = build_tools(db)
 
-    # Inject classification hint into the system message
-    classification_hint = (
-        f"\n\nQuery type: {state['classification']}. "
-        "Use appropriate tools for this type of question."
-    ) if state.get("classification") else ""
+    # ── Step 1: mandatory RAG pre-fetch ──────────────────────────────────────
+    search_tool = next((t for t in tools if t.name == "retrieve_narrative"), None)
+    pre_evidence: list[dict] = []
+    rag_text = ""
+    if search_tool:
+        try:
+            rag_result = await search_tool.ainvoke(
+                {"query": state["question"], "top_k": 8}
+            )
+            pre_evidence = [{"tool": "retrieve_narrative", "result": rag_result}]
+            rag_text = f"\n\nRelevant excerpts already retrieved from the knowledge base:\n{rag_result}"
+            log.info("pre_rag_ok", chars=len(rag_result))
+        except Exception as exc:
+            import traceback
+            log.warning("pre_rag_failed", error=str(exc), exc_type=type(exc).__name__, tb=traceback.format_exc()[-500:])
 
+    # ── Step 2: build the question with embedded evidence ────────────────────
+    classification_hint = (
+        f"\n\nQuery classification: {state['classification']}."
+        if state.get("classification") else ""
+    )
+    question_with_context = (
+        state["question"]
+        + rag_text
+        + classification_hint
+        + "\n\nAnswer using the retrieved excerpts above. "
+          "Call query_metrics or calculate if you need structured numbers."
+    )
+
+    # ── Step 3: ReAct agent ───────────────────────────────────────────────────
+    llm = _make_llm()
     agent = create_react_agent(
         model=llm,
         tools=tools,
-        prompt=SYSTEM_PROMPT + classification_hint
+        prompt=SYSTEM_PROMPT,
     )
 
-    # Build input messages
-    input_messages = [HumanMessage(content=state["question"])]
+    input_messages = [HumanMessage(content=question_with_context)]
 
     try:
-    	result = await agent.ainvoke(
+        result = await agent.ainvoke(
             {"messages": input_messages},
             config={"recursion_limit": settings.agent_max_iterations * 2},
         )
     except Exception as e:
         log.error("agent_error", error=str(e))
-        return {**state, "error": str(e)}
+        # Still try to synthesise from the pre-fetched RAG evidence
+        return {
+            **state,
+            "evidence": pre_evidence,
+            "tool_calls_made": ["search_documents"],
+            "error": str(e),
+        }
 
     messages = result.get("messages", [])
     tool_calls = [
@@ -134,10 +149,11 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
         for m in messages
         if isinstance(m, AIMessage) and m.tool_calls
     ]
+    if "search_documents" not in tool_calls and pre_evidence:
+        tool_calls = ["search_documents"] + tool_calls
 
-    # Gather raw tool outputs for the synthesiser
-    from langchain_core.messages import ToolMessage
-    evidence = []
+    # Collect tool outputs
+    evidence = list(pre_evidence)
     calculations = []
     for m in messages:
         if isinstance(m, ToolMessage):
@@ -162,17 +178,14 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     }
 
 
+# ── Node: synthesise ──────────────────────────────────────────────────────────
+
 async def synthesise(state: AgentState) -> AgentState:
-    """
-    Take the accumulated evidence + calculation results and produce the
-    final cited answer, clearly separating reported facts from interpretation.
-    """
-    if state.get("error"):
+    if state.get("error") and not state.get("evidence"):
         return {**state, "answer": f"Error: {state['error']}"}
 
     llm = _make_llm(temperature=0.1)
 
-    # Format evidence for the prompt
     evidence_text = json.dumps(state.get("evidence", []), indent=2, ensure_ascii=False)[:6000]
     calc_text = json.dumps(state.get("calculations", []), indent=2, ensure_ascii=False)[:2000]
 
@@ -190,7 +203,6 @@ async def synthesise(state: AgentState) -> AgentState:
     )
     answer = response.content
 
-    # Extract citation labels from the answer (pattern: [TICKER · FYxxxx ...])
     import re
     citations = re.findall(r"\[([A-Z]+\s*·[^\]]+)\]", answer)
 
@@ -206,18 +218,10 @@ async def synthesise(state: AgentState) -> AgentState:
 # ── Graph builder ─────────────────────────────────────────────────────────────
 
 def build_graph(db: AsyncSession) -> Any:
-    """
-    Build and compile the LangGraph state machine.
-
-    The `db` session is injected at graph-build time so all async nodes
-    share the same request-scoped session.
-    """
-
     async def _run_agent(state: AgentState) -> AgentState:
         return await run_agent(state, db)
 
     builder = StateGraph(AgentState)
-
     builder.add_node("classify", classify_query)
     builder.add_node("agent", _run_agent)
     builder.add_node("synthesise", synthesise)
@@ -230,22 +234,14 @@ def build_graph(db: AsyncSession) -> Any:
     return builder.compile()
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 async def run_research_query(
     db: AsyncSession,
     question: str,
 ) -> dict[str, Any]:
     """
-    Entry point: run a complete research query and return structured results.
-
-    Returns:
-        {
-          "answer": "...",
-          "classification": "HYBRID",
-          "citations": [...],
-          "tool_calls_made": [...],
-          "elapsed_seconds": 3.4,
-          "error": None,
-        }
+    Run a complete research query and return structured results.
     """
     graph = build_graph(db)
     initial_state: AgentState = {

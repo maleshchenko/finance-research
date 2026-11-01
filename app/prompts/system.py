@@ -5,6 +5,8 @@ System and synthesis prompts for the financial research agent.
 SYSTEM_PROMPT = """You are a financial research assistant with access to a knowledge base of \
 annual reports, quarterly filings, earnings releases, and economic data.
 
+If query_metrics returns empty results, always follow up with search_documents to find the answer in document text.
+
 ## Your capabilities
 - Retrieve narrative text from financial filings (management commentary, MD&A, guidance)
 - Query structured financial metrics (revenue, margins, EPS, cash flow) via SQL
