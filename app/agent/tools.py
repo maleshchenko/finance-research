@@ -119,6 +119,15 @@ def build_query_metrics_tool(db: AsyncSession):
 
         Returns a JSON list of metric records with period labels.
         """
+
+	    # Coerce string inputs the LLM sometimes passes
+        if fiscal_quarter is not None:
+            fiscal_quarter = int(fiscal_quarter)
+        if fiscal_year_min is not None:
+            fiscal_year_min = int(fiscal_year_min)
+        if fiscal_year_max is not None:
+            fiscal_year_max = int(fiscal_year_max)	
+
         records = await _metric_store.query_metric_series(
             db,
             tickers=tickers,
