@@ -126,7 +126,7 @@ class DocumentChunk(Base):
     token_count: Mapped[Optional[int]] = mapped_column(Integer)
     # pgvector column — dimension matched to embedding model
     embedding: Mapped[Optional[list[float]]] = mapped_column(
-        Vector(1536), nullable=True
+        Vector(768), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False

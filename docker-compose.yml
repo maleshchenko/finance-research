@@ -43,6 +43,7 @@ services:
     build: .
     environment:
       DATABASE_URL: "postgresql+asyncpg://user:password@db:5432/financial_research"
+      VECTOR_DIMENSION: "${VECTOR_DIMENSION:-1536}"
     depends_on:
       db:
         condition: service_healthy

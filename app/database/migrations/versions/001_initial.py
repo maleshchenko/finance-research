@@ -5,9 +5,12 @@ Revises:
 Create Date: 2024-01-01 00:00:00.000000
 """
 
+import os
 from alembic import op
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
+
+_VECTOR_DIM = int(os.environ.get("VECTOR_DIMENSION", "1536"))
 
 revision = "001_initial"
 down_revision = None
@@ -54,7 +57,7 @@ def upgrade() -> None:
         sa.Column("section_heading", sa.String(500), nullable=True),
         sa.Column("content", sa.Text, nullable=False),
         sa.Column("token_count", sa.Integer, nullable=True),
-        sa.Column("embedding", Vector(1536), nullable=True),
+        sa.Column("embedding", Vector(_VECTOR_DIM), nullable=True),
         sa.Column("created_at", sa.DateTime, server_default=sa.func.now(), nullable=False),
     )
     # HNSW index for fast approximate nearest-neighbour search
