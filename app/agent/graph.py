@@ -113,15 +113,17 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     agent = create_react_agent(
         model=llm,
         tools=tools,
-        prompt=SYSTEM_PROMPT + classification_hint,
-        max_iterations=settings.agent_max_iterations,
+        prompt=SYSTEM_PROMPT + classification_hint
     )
 
     # Build input messages
     input_messages = [HumanMessage(content=state["question"])]
 
     try:
-        result = await agent.ainvoke({"messages": input_messages})
+    	result = await agent.ainvoke(
+            {"messages": input_messages},
+            config={"recursion_limit": settings.agent_max_iterations * 2},
+        )
     except Exception as e:
         log.error("agent_error", error=str(e))
         return {**state, "error": str(e)}
