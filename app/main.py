@@ -22,9 +22,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from sqlalchemy import select, func
+
 from app.api.routes import documents, ingest, research
 from app.config import settings
-from app.database.session import engine
+from app.database.session import engine, AsyncSessionLocal
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -65,7 +67,11 @@ log = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: verify DB connectivity. Shutdown: dispose connection pool."""
-    log.info("app_starting", model=settings.openai_model)
+    log.info(
+        "app_starting",
+        provider=settings.llm_provider,
+        model=settings.ollama_model if settings.llm_provider == "ollama" else settings.openai_model,
+    )
 
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
@@ -104,7 +110,7 @@ app.add_middleware(
 )
 
 
-_REQUEST_TIMEOUT = 480  # seconds
+_REQUEST_TIMEOUT = 120  # seconds — matches ALB idle timeout
 
 
 @app.middleware("http")
@@ -153,3 +159,77 @@ app.include_router(documents.router)
 async def health():
     """Liveness probe — used by ALB and Docker healthcheck."""
     return {"status": "ok"}
+
+
+@app.get("/health/coverage", tags=["health"])
+async def coverage():
+    """
+    Return which ticker × fiscal_year × fiscal_quarter combinations are
+    in the database, plus per-ticker metric counts.
+
+    Use this to spot data gaps before running research queries.
+    """
+    from app.database.models import Document, FinancialMetric
+
+    async with AsyncSessionLocal() as db:
+        # Documents per ticker/period
+        doc_rows = (await db.execute(
+            select(
+                Document.company_ticker,
+                Document.company_name,
+                Document.fiscal_year,
+                Document.fiscal_quarter,
+                Document.document_type,
+            ).order_by(
+                Document.company_ticker,
+                Document.fiscal_year,
+                Document.fiscal_quarter,
+            )
+        )).all()
+
+        # Metric counts per ticker
+        metric_rows = (await db.execute(
+            select(
+                FinancialMetric.company_ticker,
+                FinancialMetric.metric_name,
+                func.count().label("count"),
+            ).group_by(
+                FinancialMetric.company_ticker,
+                FinancialMetric.metric_name,
+            ).order_by(
+                FinancialMetric.company_ticker,
+                FinancialMetric.metric_name,
+            )
+        )).all()
+
+    documents = [
+        {
+            "ticker": r.company_ticker,
+            "company": r.company_name,
+            "fiscal_year": r.fiscal_year,
+            "fiscal_quarter": r.fiscal_quarter,
+            "document_type": r.document_type,
+        }
+        for r in doc_rows
+    ]
+
+    metrics: dict[str, dict[str, int]] = {}
+    for r in metric_rows:
+        metrics.setdefault(r.company_ticker, {})[r.metric_name] = r.count
+
+    tickers = sorted({r["ticker"] for r in documents if r["ticker"]})
+    gaps = []
+    for ticker in tickers:
+        ticker_docs = [d for d in documents if d["ticker"] == ticker]
+        periods = {(d["fiscal_year"], d["fiscal_quarter"]) for d in ticker_docs}
+        ticker_metrics = metrics.get(ticker, {})
+        if not ticker_metrics:
+            gaps.append(f"{ticker}: no structured metrics extracted")
+
+    return {
+        "documents": documents,
+        "metrics_by_ticker": metrics,
+        "tickers": tickers,
+        "total_documents": len(documents),
+        "gaps": gaps,
+    }
