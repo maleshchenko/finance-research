@@ -151,7 +151,7 @@ def _make_fake_pdf(ticker: str, quarter: int, year: int = 2023) -> bytes:
     return buf.getvalue()
 
 
-async def seed():
+async def seed(reseed: bool = False):
     print("🌱 Seeding demo financial data...")
     print(f"   API: {BASE_URL}")
 
@@ -160,6 +160,18 @@ async def seed():
         resp = await client.get("/health")
         resp.raise_for_status()
         print("   ✓ API is healthy")
+
+        # If reseeding, delete existing documents first
+        if reseed:
+            resp = await client.get("/documents/")
+            if resp.status_code == 200:
+                existing = resp.json()
+                for doc in existing:
+                    doc_id = doc.get("id") or doc.get("document_id")
+                    if doc_id:
+                        del_resp = await client.delete(f"/documents/{doc_id}")
+                        status = "✓" if del_resp.status_code in (200, 204) else "✗"
+                        print(f"   {status} Deleted document {doc_id} ({doc.get('company_ticker','')} Q{doc.get('fiscal_quarter','')})")
 
         for ticker, data in COMPANIES.items():
             for quarter in range(1, 5):
@@ -191,4 +203,5 @@ async def seed():
 
 
 if __name__ == "__main__":
-    asyncio.run(seed())
+    import sys
+    asyncio.run(seed(reseed="--reseed" in sys.argv))
