@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import DocumentSummary, MetricSummary
-from app.database.models import Document
+from app.database.models import Document, DocumentChunk, FinancialMetric
 from app.database.session import get_db
 from app.retrieval.metric_store import MetricStore
 
@@ -77,6 +77,23 @@ async def get_document(
         source_filename=doc.source_filename,
         created_at=doc.created_at,
     )
+
+
+@router.delete("/{document_id}", status_code=204)
+async def delete_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete a document and all its chunks and metrics."""
+    from sqlalchemy import delete as sql_delete
+    result = await db.execute(select(Document).where(Document.id == document_id))
+    doc = result.scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    await db.execute(sql_delete(FinancialMetric).where(FinancialMetric.document_id == document_id))
+    await db.execute(sql_delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
+    await db.delete(doc)
+    await db.commit()
 
 
 @router.get("/metrics/available", response_model=list[str])
