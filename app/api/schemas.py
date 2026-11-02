@@ -49,6 +49,10 @@ class ResearchResponse(BaseModel):
     answer: str
     classification: Optional[str]
     citations: list[str]
+    evidence_sources: list[str] = Field(
+        default_factory=list,
+        description="Citation labels of chunks actually retrieved from the knowledge base",
+    )
     tool_calls_made: list[str]
     elapsed_seconds: float
     error: Optional[str] = None
