@@ -54,6 +54,7 @@ async def query(
         answer=result.get("answer") or "No answer generated.",
         classification=result.get("classification"),
         citations=result.get("citations", []),
+        evidence_sources=result.get("evidence_sources", []),
         tool_calls_made=result.get("tool_calls_made", []),
         elapsed_seconds=result.get("elapsed_seconds", 0),
         error=result.get("error"),
