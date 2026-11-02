@@ -96,14 +96,13 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     if search_tool:
         try:
             rag_result = await search_tool.ainvoke(
-                {"query": state["question"], "top_k": 8}
+                {"query": state["question"], "top_k": 12}
             )
             pre_evidence = [{"tool": "retrieve_narrative", "result": rag_result}]
             rag_text = f"\n\nRelevant excerpts already retrieved from the knowledge base:\n{rag_result}"
             log.info("pre_rag_ok", chars=len(rag_result))
         except Exception as exc:
-            import traceback
-            log.warning("pre_rag_failed", error=str(exc), exc_type=type(exc).__name__, tb=traceback.format_exc()[-500:])
+            log.warning("pre_rag_failed", error=str(exc), exc_type=type(exc).__name__)
 
     # ── Step 2: build the question with embedded evidence ────────────────────
     classification_hint = (
@@ -139,7 +138,7 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
         return {
             **state,
             "evidence": pre_evidence,
-            "tool_calls_made": ["search_documents"],
+            "tool_calls_made": ["retrieve_narrative"],
             "error": str(e),
         }
 
@@ -149,8 +148,8 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
         for m in messages
         if isinstance(m, AIMessage) and m.tool_calls
     ]
-    if "search_documents" not in tool_calls and pre_evidence:
-        tool_calls = ["search_documents"] + tool_calls
+    if "retrieve_narrative" not in tool_calls and pre_evidence:
+        tool_calls = ["retrieve_narrative"] + tool_calls
 
     # Collect tool outputs
     evidence = list(pre_evidence)
