@@ -167,6 +167,47 @@ def _detect_heading(text: str) -> Optional[str]:
     return None
 
 
+# Matches lines like:  "Operating Margin   33.4%   32.2%"
+# or:                  "Total Revenue      94,836    83,959"
+_TEXT_ROW_RE = re.compile(
+    r"^(?P<label>[A-Za-z][A-Za-z\s/&]+?)\s{2,}"   # row label (≥2 spaces before values)
+    r"(?P<val1>[\d,.()\-]+%?)"                      # first numeric value
+    r"(?:\s+(?P<val2>[\d,.()\-]+%?))?",             # optional second column
+    re.MULTILINE,
+)
+
+
+def _extract_metrics_from_text(text: str, page_number: int) -> list[RawMetric]:
+    """
+    Fallback extractor for PDFs that have no drawn table lines.
+    Parses whitespace-aligned rows like financial statement layouts.
+    """
+    metrics: list[RawMetric] = []
+    for m in _TEXT_ROW_RE.finditer(text):
+        label = m.group("label").strip()
+        match = _match_metric(label)
+        if match is None:
+            continue
+        name, category, unit = match
+        is_pct = "percent" in unit
+        raw_val = m.group("val1")
+        v = _parse_numeric(raw_val)
+        if v is None:
+            continue
+        if is_pct and -1.0 <= v <= 1.0:
+            v = round(v * 100, 2)
+        metrics.append(
+            RawMetric(
+                metric_name=name,
+                metric_category=category,
+                value=v,
+                unit=unit,
+                page_number=page_number,
+            )
+        )
+    return metrics
+
+
 # ── Public interface ──────────────────────────────────────────────────────────
 
 def extract_pdf(path: Path) -> ExtractionResult:
@@ -210,9 +251,13 @@ def extract_pdf(path: Path) -> ExtractionResult:
             ]
 
             # ── Metric extraction ─────────────────────────────────
+            page_metrics: list[RawMetric] = []
             for tbl in str_tables:
-                metrics = _extract_metrics_from_table(tbl, page_num)
-                all_metrics.extend(metrics)
+                page_metrics.extend(_extract_metrics_from_table(tbl, page_num))
+            # Fallback: parse whitespace-aligned text rows when no drawn tables found
+            if not page_metrics:
+                page_metrics.extend(_extract_metrics_from_text(text, page_num))
+            all_metrics.extend(page_metrics)
 
             pages.append(
                 PageResult(
