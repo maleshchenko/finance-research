@@ -79,7 +79,13 @@ class VectorRetriever:
     """
 
     def __init__(self) -> None:
-        self._embeddings = make_embeddings()
+        self._embeddings = None  # lazy-initialised on first use
+
+    def _get_embeddings(self):
+        """Return cached embeddings model, creating it on first call."""
+        if self._embeddings is None:
+            self._embeddings = make_embeddings()
+        return self._embeddings
 
     async def retrieve(
         self,
@@ -95,7 +101,7 @@ class VectorRetriever:
         min_sim = filters.min_similarity or settings.similarity_threshold
 
         # Embed the query
-        query_embedding = await self._embeddings.aembed_query(query)
+        query_embedding = await self._get_embeddings().aembed_query(query)
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
         # Build filter conditions on Document
