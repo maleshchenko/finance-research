@@ -110,7 +110,7 @@ app.add_middleware(
 )
 
 
-_REQUEST_TIMEOUT = 120  # seconds — matches ALB idle timeout
+_REQUEST_TIMEOUT = 480
 
 
 @app.middleware("http")
