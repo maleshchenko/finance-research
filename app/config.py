@@ -49,7 +49,17 @@ class Settings(BaseSettings):
     # Use 768 when ollama_embedding_model=nomic-embed-text; 1536 for OpenAI.
     vector_dimension: int = 1536
     similarity_top_k: int = 8
-    similarity_threshold: float = 0.35
+    # Threshold auto-defaults by provider if not set explicitly:
+    #   openai (text-embedding-3-small): cosine ~0.35 is a reasonable cut-off
+    #   ollama (nomic-embed-text):       scores are lower; use ~0.15
+    similarity_threshold: float = Field(default=-1.0)  # -1 = auto
+
+    @computed_field
+    @property
+    def effective_similarity_threshold(self) -> float:
+        if self.similarity_threshold >= 0:
+            return self.similarity_threshold
+        return 0.15 if self.llm_provider == "ollama" else 0.35
 
     # ── Ingestion ─────────────────────────────────────────────────────────────
     chunk_size: int = 800
