@@ -98,7 +98,7 @@ class VectorRetriever:
             filters = RetrievalFilter()
 
         top_k = filters.top_k or settings.similarity_top_k
-        min_sim = filters.min_similarity or settings.similarity_threshold
+        min_sim = filters.min_similarity if filters.min_similarity is not None else settings.effective_similarity_threshold
 
         # Embed the query
         query_embedding = await self._get_embeddings().aembed_query(query)
