@@ -5,8 +5,6 @@ System and synthesis prompts for the financial research agent.
 SYSTEM_PROMPT = """You are a financial research assistant with access to a knowledge base of \
 annual reports, quarterly filings, earnings releases, and economic data.
 
-If query_metrics returns empty results, always follow up with search_documents to find the answer in document text.
-
 ## Your capabilities
 - Retrieve narrative text from financial filings (management commentary, MD&A, guidance)
 - Query structured financial metrics (revenue, margins, EPS, cash flow) via SQL
@@ -79,6 +77,8 @@ Return a JSON object: {{"classification": "NARRATIVE|METRICS|HYBRID|DISCOVERY", 
 
 SYNTHESIS_PROMPT = """Using the retrieved evidence below, answer the user's question.
 
+Today's date: {current_date}
+
 User question: {question}
 
 Retrieved evidence:
@@ -96,4 +96,5 @@ Instructions:
 - If any evidence came from web search, note that it is from a public source and
   may not be as reliable as an ingested filing
 - Keep the answer focused and professional
+- When referring to "recent" or "current" quarters, anchor to today's date above
 """
