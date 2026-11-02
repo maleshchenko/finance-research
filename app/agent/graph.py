@@ -2,33 +2,20 @@
 LangGraph agent graph for the financial research assistant.
 
 Graph topology:
-┌─────────────────────────────────────────────────────────┐
-│                                                         │
-│  user_question                                          │
-│       │                                                 │
-│       ▼                                                 │
-│  classify_query                                         │
-│       │                                                 │
-│       ▼                                                 │
-│  agent_loop  (pre-fetches RAG, then ReAct)              │
-│       │                                                 │
-│       ▼                                                 │
-│  synthesise                                             │
-│       │                                                 │
-│       ▼                                                 │
-│  END (answer)                                           │
-└─────────────────────────────────────────────────────────┘
+  user_question → classify → agent_loop (pre-fetch RAG + ReAct) → synthesise → END
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import time
+from datetime import date
 from typing import Any, Optional
 
 import structlog
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +28,16 @@ from app.prompts.system import CLASSIFIER_PROMPT, SYSTEM_PROMPT, SYNTHESIS_PROMP
 
 log = structlog.get_logger(__name__)
 
+# Common ticker symbols to look for in questions
+_TICKER_RE = re.compile(r"\b([A-Z]{2,5})\b")
+_KNOWN_TICKERS = {
+    "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NVDA", "TSLA",
+    "BRK", "JPM", "V", "UNH", "JNJ", "WMT", "XOM", "PG", "MA", "HD",
+    "CVX", "MRK", "LLY", "ABBV", "PEP", "COST", "KO", "AVGO", "MCD",
+    "ACN", "TMO", "CSCO", "ABT", "DHR", "NEE", "TXN", "VZ", "ADBE",
+    "CRM", "NFLX", "INTC", "AMD", "QCOM", "IBM", "ORCL", "SAP",
+}
+
 
 # ── State definition ──────────────────────────────────────────────────────────
 
@@ -51,6 +48,7 @@ class AgentState(TypedDict):
     tool_calls_made: list[str]
     evidence: list[dict[str, Any]]
     calculations: list[dict[str, Any]]
+    evidence_sources: list[str]        # citation labels extracted from evidence
     answer: Optional[str]
     citations: list[str]
     error: Optional[str]
@@ -61,6 +59,14 @@ class AgentState(TypedDict):
 
 def _make_llm(temperature: float = settings.agent_temperature):
     return make_llm(temperature=temperature)
+
+
+# ── Ticker extraction ─────────────────────────────────────────────────────────
+
+def _extract_tickers(question: str) -> list[str]:
+    """Pull recognised ticker symbols out of the question text."""
+    found = _TICKER_RE.findall(question)
+    return [t for t in dict.fromkeys(found) if t in _KNOWN_TICKERS]
 
 
 # ── Node: classify ────────────────────────────────────────────────────────────
@@ -83,28 +89,66 @@ async def classify_query(state: AgentState) -> AgentState:
 
 async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     """
-    1. Pre-fetch RAG results directly (don't rely on the LLM to call the tool).
-    2. Inject them into the prompt so the model always has evidence.
+    1. Pre-fetch RAG: one retrieve_narrative call per detected ticker (parallel),
+       falling back to a single broad query if no tickers found.
+    2. Inject retrieved evidence into the prompt.
     3. Run the ReAct agent for any additional tool calls.
     """
     tools = build_tools(db)
-
-    # ── Step 1: mandatory RAG pre-fetch ──────────────────────────────────────
     search_tool = next((t for t in tools if t.name == "retrieve_narrative"), None)
+
+    # ── Step 1: parallel per-ticker RAG pre-fetch ─────────────────────────────
     pre_evidence: list[dict] = []
     rag_text = ""
+
     if search_tool:
+        tickers = _extract_tickers(state["question"])
+        log.info("pre_rag_tickers", tickers=tickers or ["(broad)"])
+
+        async def _fetch(ticker_filter: Optional[str]) -> str:
+            kwargs: dict[str, Any] = {"query": state["question"], "top_k": 6}
+            if ticker_filter:
+                kwargs["tickers"] = [ticker_filter]
+            return await search_tool.ainvoke(kwargs)
+
         try:
-            rag_result = await search_tool.ainvoke(
-                {"query": state["question"], "top_k": 12}
-            )
-            pre_evidence = [{"tool": "retrieve_narrative", "result": rag_result}]
-            rag_text = f"\n\nRelevant excerpts already retrieved from the knowledge base:\n{rag_result}"
-            log.info("pre_rag_ok", chars=len(rag_result))
+            if tickers:
+                # One call per ticker in parallel
+                raw_results = await asyncio.gather(
+                    *[_fetch(t) for t in tickers],
+                    return_exceptions=True,
+                )
+                combined: list[dict] = []
+                for ticker, raw in zip(tickers, raw_results):
+                    if isinstance(raw, Exception):
+                        log.warning("pre_rag_ticker_failed", ticker=ticker, error=str(raw))
+                        continue
+                    try:
+                        chunks = json.loads(raw)
+                        if isinstance(chunks, list):
+                            combined.extend(chunks)
+                    except (json.JSONDecodeError, TypeError):
+                        combined.append({"ticker": ticker, "raw": raw})
+
+                if combined:
+                    pre_evidence = [{"tool": "retrieve_narrative", "result": combined}]
+                    rag_text = (
+                        "\n\nRelevant excerpts retrieved from the knowledge base "
+                        f"(per-ticker parallel fetch for {', '.join(tickers)}):\n"
+                        + json.dumps(combined, ensure_ascii=False)
+                    )
+                    log.info("pre_rag_ok", tickers=tickers, chunks=len(combined))
+            else:
+                # Broad single query
+                raw = await _fetch(None)
+                pre_evidence = [{"tool": "retrieve_narrative", "result": raw}]
+                rag_text = f"\n\nRelevant excerpts retrieved from the knowledge base:\n{raw}"
+                log.info("pre_rag_ok", tickers=[], chars=len(raw))
+
         except Exception as exc:
             log.warning("pre_rag_failed", error=str(exc), exc_type=type(exc).__name__)
 
-    # ── Step 2: build the question with embedded evidence ────────────────────
+    # ── Step 2: build question with embedded evidence ─────────────────────────
     classification_hint = (
         f"\n\nQuery classification: {state['classification']}."
         if state.get("classification") else ""
@@ -119,12 +163,7 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
 
     # ── Step 3: ReAct agent ───────────────────────────────────────────────────
     llm = _make_llm()
-    agent = create_react_agent(
-        model=llm,
-        tools=tools,
-        prompt=SYSTEM_PROMPT,
-    )
-
+    agent = create_react_agent(model=llm, tools=tools, prompt=SYSTEM_PROMPT)
     input_messages = [HumanMessage(content=question_with_context)]
 
     try:
@@ -134,11 +173,11 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
         )
     except Exception as e:
         log.error("agent_error", error=str(e))
-        # Still try to synthesise from the pre-fetched RAG evidence
         return {
             **state,
             "evidence": pre_evidence,
             "tool_calls_made": ["retrieve_narrative"],
+            "evidence_sources": _extract_sources(pre_evidence),
             "error": str(e),
         }
 
@@ -174,7 +213,25 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
         "tool_calls_made": tool_calls,
         "evidence": evidence,
         "calculations": calculations,
+        "evidence_sources": _extract_sources(evidence),
     }
+
+
+def _extract_sources(evidence: list[dict]) -> list[str]:
+    """Pull citation labels out of retrieved chunks."""
+    sources: list[str] = []
+    for item in evidence:
+        result = item.get("result", item)
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if isinstance(result, list):
+            for chunk in result:
+                if isinstance(chunk, dict) and "citation" in chunk:
+                    sources.append(chunk["citation"])
+    return list(dict.fromkeys(sources))  # deduplicate, preserve order
 
 
 # ── Node: synthesise ──────────────────────────────────────────────────────────
@@ -192,6 +249,7 @@ async def synthesise(state: AgentState) -> AgentState:
         question=state["question"],
         evidence=evidence_text,
         calculations=calc_text,
+        current_date=date.today().isoformat(),
     )
 
     response = await llm.ainvoke(
@@ -202,16 +260,17 @@ async def synthesise(state: AgentState) -> AgentState:
     )
     answer = response.content
 
-    import re
-    citations = re.findall(r"\[([A-Z]+\s*·[^\]]+)\]", answer)
+    # Extract citation labels from both the answer text and pre-built evidence_sources
+    cited = re.findall(r"\[([A-Z]+\s*·[^\]]+)\]", answer)
+    all_citations = list(dict.fromkeys(state.get("evidence_sources", []) + cited))
 
     log.info(
         "synthesis_complete",
         answer_length=len(answer),
-        citations=len(citations),
+        citations=len(all_citations),
         elapsed=round(time.perf_counter() - state["start_time"], 2),
     )
-    return {**state, "answer": answer, "citations": citations}
+    return {**state, "answer": answer, "citations": all_citations}
 
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
@@ -239,9 +298,6 @@ async def run_research_query(
     db: AsyncSession,
     question: str,
 ) -> dict[str, Any]:
-    """
-    Run a complete research query and return structured results.
-    """
     graph = build_graph(db)
     initial_state: AgentState = {
         "question": question,
@@ -250,6 +306,7 @@ async def run_research_query(
         "tool_calls_made": [],
         "evidence": [],
         "calculations": [],
+        "evidence_sources": [],
         "answer": None,
         "citations": [],
         "error": None,
@@ -263,6 +320,7 @@ async def run_research_query(
         "answer": final_state.get("answer"),
         "classification": final_state.get("classification"),
         "citations": final_state.get("citations", []),
+        "evidence_sources": final_state.get("evidence_sources", []),
         "tool_calls_made": final_state.get("tool_calls_made", []),
         "elapsed_seconds": elapsed,
         "error": final_state.get("error"),
