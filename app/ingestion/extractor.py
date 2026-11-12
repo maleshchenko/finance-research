@@ -170,7 +170,7 @@ def _detect_heading(text: str) -> Optional[str]:
 # Matches lines like:  "Operating Margin   33.4%   32.2%"
 # or:                  "Total Revenue      94,836    83,959"
 _TEXT_ROW_RE = re.compile(
-    r"^(?P<label>[A-Za-z][A-Za-z\s/&]+?)\s{2,}"   # row label (≥2 spaces before values)
+    r"^(?P<label>[A-Za-z][A-Za-z\s/&]+?)\s+"      # row label and normalized separator
     r"(?P<val1>[\d,.()\-]+%?)"                      # first numeric value
     r"(?:\s+(?P<val2>[\d,.()\-]+%?))?",             # optional second column
     re.MULTILINE,

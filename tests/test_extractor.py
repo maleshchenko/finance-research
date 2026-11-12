@@ -8,9 +8,12 @@ import pytest
 
 from app.ingestion.extractor import (
     _detect_heading,
+    _extract_metrics_from_text,
     _extract_metrics_from_table,
     _parse_numeric,
+    extract_pdf,
 )
+from scripts.seed_demo import _make_fake_pdf
 
 
 # ── _parse_numeric ────────────────────────────────────────────────────────────
@@ -92,6 +95,41 @@ class TestExtractMetrics:
         margin = next((m for m in metrics if m.metric_name == "operating_margin"), None)
         assert margin is not None
         assert margin.value == pytest.approx(28.4)
+
+    def test_extracts_metrics_when_pdf_text_uses_single_spaces(self):
+        text = (
+            "Total Revenue 94,836 83,455\n"
+            "Operating Income 30,328 24,868\n"
+            "Operating Margin 32.0% 30.8%\n"
+            "Net Income 24,160 20,294\n"
+            "Diluted EPS 1.52 1.28\n"
+        )
+
+        metrics = _extract_metrics_from_text(text, page_number=1)
+
+        assert {metric.metric_name for metric in metrics} == {
+            "revenue",
+            "operating_income",
+            "operating_margin",
+            "net_income",
+            "eps_diluted",
+        }
+        margin = next(metric for metric in metrics if metric.metric_name == "operating_margin")
+        assert margin.value == pytest.approx(32.0)
+
+    def test_demo_seed_pdf_produces_structured_metrics(self, tmp_path):
+        path = tmp_path / "AAPL_Q1_FY2023.pdf"
+        path.write_bytes(_make_fake_pdf("AAPL", quarter=1))
+
+        extraction = extract_pdf(path)
+
+        assert {metric.metric_name for metric in extraction.metrics} >= {
+            "revenue",
+            "operating_income",
+            "operating_margin",
+            "net_income",
+            "eps_diluted",
+        }
 
 
 # ── _detect_heading ───────────────────────────────────────────────────────────
