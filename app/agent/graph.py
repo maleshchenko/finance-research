@@ -26,6 +26,7 @@ from app.llm import make_llm
 from app.prompts.system import (
     CLASSIFIER_PROMPT,
     GROUNDING_EVALUATOR_PROMPT,
+    METRIC_TREND_PROMPT,
     SYNTHESIS_PROMPT,
     SYSTEM_PROMPT,
 )
@@ -35,24 +36,70 @@ log = structlog.get_logger(__name__)
 # Common ticker symbols to look for in questions
 _TICKER_RE = re.compile(r"\b([A-Z]{2,5})\b")
 _KNOWN_TICKERS = {
-    "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NVDA", "TSLA",
-    "BRK", "JPM", "V", "UNH", "JNJ", "WMT", "XOM", "PG", "MA", "HD",
-    "CVX", "MRK", "LLY", "ABBV", "PEP", "COST", "KO", "AVGO", "MCD",
-    "ACN", "TMO", "CSCO", "ABT", "DHR", "NEE", "TXN", "VZ", "ADBE",
-    "CRM", "NFLX", "INTC", "AMD", "QCOM", "IBM", "ORCL", "SAP",
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "GOOG",
+    "AMZN",
+    "META",
+    "NVDA",
+    "TSLA",
+    "BRK",
+    "JPM",
+    "V",
+    "UNH",
+    "JNJ",
+    "WMT",
+    "XOM",
+    "PG",
+    "MA",
+    "HD",
+    "CVX",
+    "MRK",
+    "LLY",
+    "ABBV",
+    "PEP",
+    "COST",
+    "KO",
+    "AVGO",
+    "MCD",
+    "ACN",
+    "TMO",
+    "CSCO",
+    "ABT",
+    "DHR",
+    "NEE",
+    "TXN",
+    "VZ",
+    "ADBE",
+    "CRM",
+    "NFLX",
+    "INTC",
+    "AMD",
+    "QCOM",
+    "IBM",
+    "ORCL",
+    "SAP",
 }
 
 
 # ── State definition ──────────────────────────────────────────────────────────
 
+
 class AgentState(TypedDict):
     question: str
     classification: Optional[str]
+    structured_metric_request: Optional[dict[str, Any]]
+    structured_metric_records: list[dict[str, Any]]
+    deterministic_metrics_answer: bool
+    structured_metrics_table: Optional[str]
+    structured_metrics_summary: Optional[str]
+    metric_explanation: Optional[str]
     messages: list[BaseMessage]
     tool_calls_made: list[str]
     evidence: list[dict[str, Any]]
     calculations: list[dict[str, Any]]
-    evidence_sources: list[str]        # citation labels extracted from evidence
+    evidence_sources: list[str]  # citation labels extracted from evidence
     answer: Optional[str]
     citations: list[str]
     grounding_status: Optional[str]
@@ -64,11 +111,13 @@ class AgentState(TypedDict):
 
 # ── LLM factory ───────────────────────────────────────────────────────────────
 
+
 def _make_llm(temperature: float = settings.agent_temperature):
     return make_llm(temperature=temperature)
 
 
 # ── Ticker extraction ─────────────────────────────────────────────────────────
+
 
 def _extract_tickers(question: str) -> list[str]:
     """Pull recognised ticker symbols out of the question text."""
@@ -76,9 +125,71 @@ def _extract_tickers(question: str) -> list[str]:
     return [t for t in dict.fromkeys(found) if t in _KNOWN_TICKERS]
 
 
+def _parse_metric_request(question: str) -> dict[str, Any] | None:
+    """Recognize unambiguous operating-margin comparisons with an explicit FY."""
+    normalized = question.lower()
+    if not re.search(r"\boperating\s+margins?\b", normalized):
+        return None
+    if not re.search(r"\b(compare|comparing|across|over)\b", normalized):
+        return None
+    if re.search(r"\b(why|reason|cause|driver|drove)\b", normalized):
+        return None
+
+    year_match = re.search(r"\bfy\s*(20\d{2})\b", normalized)
+    tickers = _extract_tickers(question)
+    if year_match is None or not tickers:
+        return None
+
+    quarters = sorted({int(quarter) for quarter in re.findall(r"\bq([1-4])\b", normalized)}) or [
+        1,
+        2,
+        3,
+        4,
+    ]
+    return {
+        "tickers": tickers,
+        "metric_name": "operating_margin",
+        "fiscal_year": int(year_match.group(1)),
+        "quarters": quarters,
+        "include_explanation": bool(
+            re.search(r"\b(explain|interpret|trend|pattern|insight)\b", normalized)
+        ),
+    }
+
+
 # ── Node: classify ────────────────────────────────────────────────────────────
 
 _VALID_CLASSIFICATIONS = {"NARRATIVE", "METRICS", "HYBRID", "DISCOVERY"}
+
+_GROUNDING_VERDICT_SCHEMA = {
+    "title": "GroundingVerdict",
+    "type": "object",
+    "properties": {
+        "passed": {"type": "boolean"},
+        "issues": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["passed", "issues"],
+    "additionalProperties": False,
+}
+
+_METRIC_TREND_SCHEMA = {
+    "title": "MetricDirectionGroups",
+    "type": "object",
+    "properties": {
+        "overall_direction_groups": {
+            "type": "object",
+            "properties": {
+                "increased": {"type": "array", "items": {"type": "string"}},
+                "decreased": {"type": "array", "items": {"type": "string"}},
+                "unchanged": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["increased", "decreased", "unchanged"],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["overall_direction_groups"],
+    "additionalProperties": False,
+}
 
 
 def _coerce_json_like(value: Any) -> Any:
@@ -125,7 +236,7 @@ def _normalise_classification(value: Any) -> str:
         return "HYBRID"
 
     if isinstance(value, str):
-        candidate = value.strip().strip('"\'')
+        candidate = value.strip().strip("\"'")
         normalized = candidate.upper()
         if normalized in _VALID_CLASSIFICATIONS:
             return normalized
@@ -135,6 +246,19 @@ def _normalise_classification(value: Any) -> str:
 
 async def classify_query(state: AgentState) -> AgentState:
     question = state.get("question") or ""
+    metric_request = _parse_metric_request(question)
+    if metric_request:
+        log.info(
+            "query_classified",
+            classification="METRICS",
+            route="structured_metrics",
+        )
+        return {
+            **state,
+            "classification": "METRICS",
+            "structured_metric_request": metric_request,
+        }
+
     log.info("query_classification_started", question_length=len(question))
     llm = _make_llm(temperature=0.0)
     prompt = CLASSIFIER_PROMPT.format(question=question)
@@ -152,6 +276,7 @@ async def classify_query(state: AgentState) -> AgentState:
 
 # ── Node: agent ───────────────────────────────────────────────────────────────
 
+
 async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     """
     1. Pre-fetch RAG: one retrieve_narrative call per detected ticker (parallel),
@@ -161,6 +286,45 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     """
     log.info("agent_started", classification=state.get("classification"))
     tools = build_tools(db)
+    metric_request = state.get("structured_metric_request")
+    if metric_request:
+        metric_tool = next((t for t in tools if t.name == "query_metrics"), None)
+        if metric_tool is None:
+            raise RuntimeError("The structured metrics tool is not configured.")
+        raw_result = await metric_tool.ainvoke(
+            {
+                "tickers": metric_request["tickers"],
+                "metric_names": [metric_request["metric_name"]],
+                "fiscal_year_min": metric_request["fiscal_year"],
+                "fiscal_year_max": metric_request["fiscal_year"],
+            }
+        )
+        parsed_result = json.loads(raw_result)
+        records = (
+            parsed_result
+            if isinstance(parsed_result, list)
+            else parsed_result.get("results")
+            if isinstance(parsed_result, dict)
+            else None
+        )
+        if not isinstance(records, list):
+            raise ValueError("Structured metrics tool returned an invalid response.")
+        evidence = [{"tool": "query_metrics", "result": records}]
+        log.info(
+            "structured_metrics_query_complete",
+            tickers=metric_request["tickers"],
+            metric=metric_request["metric_name"],
+            records=len(records),
+        )
+        return {
+            **state,
+            "tool_calls_made": ["query_metrics"],
+            "evidence": evidence,
+            "structured_metric_records": records,
+            "deterministic_metrics_answer": True,
+            "evidence_sources": _extract_sources(evidence),
+        }
+
     search_tool = next((t for t in tools if t.name == "retrieve_narrative"), None)
 
     # ── Step 1: parallel per-ticker RAG pre-fetch ─────────────────────────────
@@ -217,14 +381,15 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     # ── Step 2: build question with embedded evidence ─────────────────────────
     classification_hint = (
         f"\n\nQuery classification: {state['classification']}."
-        if state.get("classification") else ""
+        if state.get("classification")
+        else ""
     )
     question_with_context = (
         state["question"]
         + rag_text
         + classification_hint
         + "\n\nAnswer using the retrieved excerpts above. "
-          "Call query_metrics or calculate if you need structured numbers."
+        "Call query_metrics or calculate if you need structured numbers."
     )
 
     # ── Step 3: ReAct agent ───────────────────────────────────────────────────
@@ -250,9 +415,7 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
 
     messages = result.get("messages", [])
     tool_calls = [
-        m.tool_calls[0]["name"]
-        for m in messages
-        if isinstance(m, AIMessage) and m.tool_calls
+        m.tool_calls[0]["name"] for m in messages if isinstance(m, AIMessage) and m.tool_calls
     ]
     if "retrieve_narrative" not in tool_calls and pre_evidence:
         tool_calls = ["retrieve_narrative"] + tool_calls
@@ -309,6 +472,79 @@ def _extract_sources(evidence: list[dict]) -> list[str]:
 
 # ── Node: synthesise ──────────────────────────────────────────────────────────
 
+
+def _calculate_metric_trends(
+    request: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    periods = [f"FY{request['fiscal_year']} Q{quarter}" for quarter in request["quarters"]]
+    records_by_cell: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        key = (record["ticker"], record["period"])
+        records_by_cell.setdefault(key, []).append(record)
+
+    trend_facts: list[dict[str, Any]] = []
+    source_refs_by_ticker: dict[str, list[str]] = {}
+    for ticker in request["tickers"]:
+        values: list[float] = []
+        source_refs: list[str] = []
+        for period in periods:
+            candidates = records_by_cell.get((ticker, period), [])
+            candidate_values = {float(record["value"]) for record in candidates}
+            if not candidates or len(candidate_values) != 1:
+                raise ValueError(
+                    f"Cannot interpret inconsistent metric data for {ticker} {period}."
+                )
+            values.append(next(iter(candidate_values)))
+            source_refs.append(f"[{ticker} {period}]")
+        source_refs_by_ticker[ticker] = source_refs
+
+        changes = [
+            {
+                "from": periods[index],
+                "to": periods[index + 1],
+                "direction": (
+                    "increased"
+                    if values[index + 1] > values[index]
+                    else "decreased"
+                    if values[index + 1] < values[index]
+                    else "was unchanged"
+                ),
+            }
+            for index in range(len(values) - 1)
+        ]
+        overall_direction = (
+            "increased"
+            if values[-1] > values[0]
+            else "decreased"
+            if values[-1] < values[0]
+            else "was unchanged"
+        )
+        trend_facts.append(
+            {
+                "ticker": ticker,
+                "overall_direction": overall_direction,
+                "period_changes": changes,
+                "source_refs": source_refs,
+            }
+        )
+    return trend_facts, source_refs_by_ticker
+
+
+def _render_metric_trend_summary(trend_facts: list[dict[str, Any]]) -> str:
+    lines = ["### Calculated trend summary", ""]
+    for trend in trend_facts:
+        changes = [
+            f"{change['direction']} from {change['from']} to {change['to']}"
+            for change in trend["period_changes"]
+        ]
+        first_period, last_period = trend["source_refs"][0], trend["source_refs"][-1]
+        overall = f"overall {trend['overall_direction']} from {first_period} to {last_period}"
+        refs = " ".join(trend["source_refs"])
+        lines.append(f"- {trend['ticker']}: {'; '.join(changes)}; {overall}. {refs}")
+    return "\n".join(lines)
+
+
 def _evidence_text(state: AgentState) -> tuple[str, str]:
     evidence_text = json.dumps(state.get("evidence", []), indent=2, ensure_ascii=False)[:6000]
     calc_text = json.dumps(state.get("calculations", []), indent=2, ensure_ascii=False)[:2000]
@@ -348,7 +584,261 @@ def _answer_citations(state: AgentState, answer: str) -> list[str]:
     return list(dict.fromkeys(state.get("evidence_sources", []) + cited))
 
 
+def _format_metric_value(value: float, unit: str | None) -> str:
+    if unit == "percent":
+        formatted = f"{value:.4f}".rstrip("0").rstrip(".")
+        return f"{formatted}%"
+    return f"{value:,.2f}".rstrip("0").rstrip(".")
+
+
+def _render_metric_answer(
+    request: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> tuple[str, list[str], str, list[str]]:
+    periods = [f"FY{request['fiscal_year']} Q{q}" for q in request["quarters"]]
+    records_by_cell: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        key = (record["ticker"], record["period"])
+        records_by_cell.setdefault(key, []).append(record)
+
+    lines = [
+        f"### Operating Margin — FY{request['fiscal_year']}",
+        "",
+        "| Company | Period | Value |",
+        "|---|---|---:|",
+    ]
+    citations: list[str] = []
+    notes: list[str] = []
+    issues: list[str] = []
+    available_cells = 0
+
+    for ticker in request["tickers"]:
+        for period in periods:
+            candidates = records_by_cell.get((ticker, period), [])
+            notes.extend(
+                record["source_note"] for record in candidates if record.get("source_note")
+            )
+            references = list(
+                dict.fromkeys(record["citation"] for record in candidates if record.get("citation"))
+            )
+            citations.extend(references)
+            refs_text = " ".join(
+                ref if ref.startswith("[") and "](" in ref else f"[{ref}]" for ref in references
+            )
+
+            if not candidates:
+                lines.append(f"| {ticker} | {period} | Not available in structured data |")
+                issues.append(f"No structured metric record found for {ticker} {period}.")
+                continue
+
+            values = {(float(record["value"]), record.get("unit")) for record in candidates}
+            if len(values) > 1:
+                lines.append(
+                    f"| {ticker} | {period} | Conflicting records; value withheld {refs_text} |"
+                )
+                issues.append(f"Conflicting structured records for {ticker} {period}.")
+                continue
+
+            available_cells += 1
+            value, unit = next(iter(values))
+            lines.append(
+                f"| {ticker} | {period} | {_format_metric_value(value, unit)} {refs_text}|"
+            )
+
+    total_cells = len(request["tickers"]) * len(periods)
+    status = (
+        "verified"
+        if available_cells == total_cells
+        else "partial"
+        if available_cells
+        else "insufficient_data"
+    )
+    lines.extend(
+        [
+            "",
+            f"Consistent structured values available for {available_cells} of {total_cells} cells.",
+        ]
+    )
+    if notes:
+        lines.append("Data notes: " + " ".join(dict.fromkeys(notes)))
+
+    return (
+        "\n".join(lines),
+        list(dict.fromkeys(citations)),
+        status,
+        issues,
+    )
+
+
+async def _generate_metric_explanation(
+    state: AgentState,
+    revision_feedback: str = "",
+) -> tuple[str | None, list[str]]:
+    request = state.get("structured_metric_request")
+    if request is None:
+        raise RuntimeError("Structured metric results have no associated request.")
+
+    trend_facts, source_refs_by_ticker = _calculate_metric_trends(
+        request,
+        state.get("structured_metric_records", []),
+    )
+    direction_groups: dict[str, list[str]] = {
+        "increased": [],
+        "decreased": [],
+        "unchanged": [],
+    }
+    for trend in trend_facts:
+        group = (
+            "unchanged"
+            if trend["overall_direction"] == "was unchanged"
+            else trend["overall_direction"]
+        )
+        direction_groups[group].append(trend["ticker"])
+
+    prompt = METRIC_TREND_PROMPT.format(
+        question=state["question"],
+        records=json.dumps(trend_facts, ensure_ascii=False),
+        revision_feedback=revision_feedback or "No revision feedback.",
+    )
+    llm = _make_llm(temperature=0.1)
+    with_structured_output = getattr(llm, "with_structured_output", None)
+    if callable(with_structured_output):
+        llm = with_structured_output(_METRIC_TREND_SCHEMA, method="json_schema")
+    response = await llm.ainvoke(
+        [
+            SystemMessage(content="Interpret only the supplied structured metrics."),
+            HumanMessage(content=prompt),
+        ]
+    )
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        parsed_content = _coerce_json_like(content)
+        if isinstance(parsed_content, dict):
+            content = parsed_content
+
+    if not isinstance(content, dict):
+        return None, ["LLM trend synthesis returned a malformed direction report."]
+    actual_groups = content.get("overall_direction_groups")
+    if not isinstance(actual_groups, dict):
+        return None, ["LLM trend synthesis omitted overall direction groups."]
+
+    issues: list[str] = []
+    for direction, expected_tickers in direction_groups.items():
+        actual_tickers = actual_groups.get(direction)
+        if (
+            not isinstance(actual_tickers, list)
+            or not all(isinstance(ticker, str) for ticker in actual_tickers)
+            or len(actual_tickers) != len(set(actual_tickers))
+            or set(actual_tickers) != set(expected_tickers)
+        ):
+            issues.append(
+                f"LLM classified {direction} overall trend for "
+                f"{actual_tickers!r}; expected {expected_tickers!r}."
+            )
+    if set(actual_groups) != set(direction_groups):
+        issues.append("LLM trend synthesis returned unexpected direction groups.")
+    if issues:
+        return None, issues
+
+    clauses: list[str] = []
+    for direction in ("increased", "decreased", "unchanged"):
+        tickers = [ticker for ticker in request["tickers"] if ticker in direction_groups[direction]]
+        if not tickers:
+            continue
+        if len(tickers) == 1:
+            names = tickers[0]
+        elif len(tickers) == 2:
+            names = f"{tickers[0]} and {tickers[1]}"
+        else:
+            names = f"{', '.join(tickers[:-1])}, and {tickers[-1]}"
+        verb = "was unchanged for" if direction == "unchanged" else f"{direction} for"
+        clauses.append(f"{verb} {names}")
+
+    explanation = "Overall, operating margins " + "; ".join(clauses) + "."
+    source_refs = [
+        source_ref
+        for ticker in request["tickers"]
+        for source_ref in (source_refs_by_ticker[ticker][0], source_refs_by_ticker[ticker][-1])
+    ]
+    return f"{explanation} {' '.join(source_refs)}", []
+
+
 async def synthesise(state: AgentState) -> AgentState:
+    if state.get("deterministic_metrics_answer"):
+        request = state.get("structured_metric_request")
+        if request is None:
+            raise RuntimeError("Structured metric results have no associated request.")
+        table, citations, status, issues = _render_metric_answer(
+            request,
+            state.get("structured_metric_records", []),
+        )
+        result = {
+            **state,
+            "answer": table,
+            "citations": citations,
+            "grounding_status": status,
+            "grounding_issues": issues,
+            "unverified_draft": None,
+            "structured_metrics_table": table,
+            "structured_metrics_summary": None,
+            "metric_explanation": None,
+        }
+        if request.get("include_explanation") and status == "verified":
+            trend_facts, _ = _calculate_metric_trends(
+                request,
+                state.get("structured_metric_records", []),
+            )
+            summary = _render_metric_trend_summary(trend_facts)
+            result.update(
+                answer=f"{table}\n\n{summary}",
+                structured_metrics_summary=summary,
+            )
+            log.info(
+                "metric_trend_synthesis_started",
+                provider=settings.llm_provider,
+                records=len(state.get("structured_metric_records", [])),
+            )
+            explanation, trend_issues = await _generate_metric_explanation(result)
+            if trend_issues:
+                log.info(
+                    "metric_trend_revision_started",
+                    issue_count=len(trend_issues),
+                )
+                explanation, trend_issues = await _generate_metric_explanation(
+                    result,
+                    revision_feedback="\n".join(trend_issues),
+                )
+            if explanation is not None:
+                result.update(
+                    answer=f"{table}\n\n{summary}\n\n### LLM synthesis\n\n{explanation}",
+                    metric_explanation=explanation,
+                )
+                log.info(
+                    "metric_trend_synthesis_complete",
+                    answer_length=len(explanation),
+                )
+            else:
+                result.update(
+                    answer=(
+                        f"{table}\n\n{summary}\n\n"
+                        "LLM synthesis was withheld because it did not match the "
+                        "calculated trend directions."
+                    ),
+                    grounding_status="partial",
+                    grounding_issues=trend_issues,
+                )
+                log.warning(
+                    "metric_trend_synthesis_withheld",
+                    issue_count=len(trend_issues),
+                )
+        elif request.get("include_explanation"):
+            log.info(
+                "metric_trend_synthesis_skipped",
+                reason="structured_data_incomplete",
+                status=status,
+            )
+        return result
+
     if state.get("error") and not state.get("evidence"):
         return {**state, "answer": f"Error: {state['error']}"}
 
@@ -367,11 +857,22 @@ async def synthesise(state: AgentState) -> AgentState:
 
 # ── Node: grounding evaluator ─────────────────────────────────────────────────
 
+
 def _parse_grounding_verdict(content: Any) -> tuple[bool, list[str]]:
-    try:
-        verdict = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        return False, ["Grounding evaluator returned invalid JSON."]
+    verdict = _coerce_json_like(content)
+    if not isinstance(verdict, dict):
+        text = str(content)
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(text):
+            if character != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                verdict = candidate
+                break
 
     if (
         not isinstance(verdict, dict)
@@ -407,16 +908,28 @@ async def _evaluate_answer(state: AgentState) -> tuple[bool, list[str]]:
         },
         ensure_ascii=False,
     )
-    response = await _make_llm(temperature=0.0).ainvoke(
+    llm = _make_llm(temperature=0.0)
+    with_structured_output = getattr(llm, "with_structured_output", None)
+    if callable(with_structured_output):
+        llm = with_structured_output(_GROUNDING_VERDICT_SCHEMA, method="json_schema")
+    response = await llm.ainvoke(
         [
             SystemMessage(content=GROUNDING_EVALUATOR_PROMPT),
             HumanMessage(content=review_input),
         ]
     )
-    return _parse_grounding_verdict(response.content)
+    return _parse_grounding_verdict(getattr(response, "content", response))
 
 
 async def verify_grounding(state: AgentState) -> AgentState:
+    if state.get("deterministic_metrics_answer"):
+        log.info(
+            "grounding_check_skipped",
+            reason="structured_metrics_and_validated_trend_groups",
+            status=state.get("grounding_status"),
+        )
+        return state
+
     if state.get("error") and not state.get("evidence"):
         log.info("grounding_check_skipped", reason="agent_error_without_evidence")
         return {**state, "grounding_status": "not_evaluated", "grounding_issues": []}
@@ -462,6 +975,7 @@ async def verify_grounding(state: AgentState) -> AgentState:
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
 
+
 def build_graph(db: AsyncSession) -> Any:
     async def _run_agent(state: AgentState) -> AgentState:
         return await run_agent(state, db)
@@ -483,6 +997,7 @@ def build_graph(db: AsyncSession) -> Any:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+
 async def run_research_query(
     db: AsyncSession,
     question: str,
@@ -491,6 +1006,12 @@ async def run_research_query(
     initial_state: AgentState = {
         "question": question,
         "classification": None,
+        "structured_metric_request": None,
+        "structured_metric_records": [],
+        "deterministic_metrics_answer": False,
+        "structured_metrics_table": None,
+        "structured_metrics_summary": None,
+        "metric_explanation": None,
         "messages": [],
         "tool_calls_made": [],
         "evidence": [],

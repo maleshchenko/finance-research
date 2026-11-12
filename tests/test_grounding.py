@@ -66,6 +66,15 @@ def test_grounding_verdict_requires_clean_pass():
     assert issues == ["GOOGL operating margin Q4 FY2023 is unsupported."]
 
 
+def test_grounding_verdict_extracts_json_surrounded_by_explanatory_text():
+    passed, issues = graph._parse_grounding_verdict(
+        'Evaluator response: {"passed": true, "issues": []} End of response.'
+    )
+
+    assert passed
+    assert issues == []
+
+
 @pytest.mark.parametrize("content", ["not json", '{"passed": true}'])
 def test_invalid_grounding_verdict_fails_closed(content):
     passed, issues = graph._parse_grounding_verdict(content)
@@ -74,14 +83,35 @@ def test_invalid_grounding_verdict_fails_closed(content):
 
 
 @pytest.mark.asyncio
+async def test_grounding_evaluator_uses_json_schema_output(monkeypatch):
+    class _StructuredFakeLLM:
+        def with_structured_output(self, schema, *, method):
+            assert schema == graph._GROUNDING_VERDICT_SCHEMA
+            assert method == "json_schema"
+            return self
+
+        async def ainvoke(self, _messages):
+            return {"passed": True, "issues": []}
+
+    monkeypatch.setattr(graph, "_make_llm", lambda temperature: _StructuredFakeLLM())
+
+    passed, issues = await graph._evaluate_answer(_state())
+
+    assert passed
+    assert issues == []
+
+
+@pytest.mark.asyncio
 async def test_classify_query_accepts_markdown_json(monkeypatch):
-    llm = _FakeLLM(["```json\n{\"classification\": \"METRICS\", \"reasoning\": \"Revenue question\"}\n```"])
+    llm = _FakeLLM(['```json\n{"classification": "METRICS", "reasoning": "Revenue question"}\n```'])
     monkeypatch.setattr(graph, "_make_llm", lambda temperature: llm)
 
-    result = await graph.classify_query({
-        "question": "What was Apple's revenue in Q4 2023?",
-        "classification": None,
-    })
+    result = await graph.classify_query(
+        {
+            "question": "What was Apple's revenue in Q4 2023?",
+            "classification": None,
+        }
+    )
 
     assert result["classification"] == "METRICS"
 
@@ -91,10 +121,12 @@ async def test_classify_query_defaults_to_hybrid_when_response_is_unparseable(mo
     llm = _FakeLLM(['"classification"'])
     monkeypatch.setattr(graph, "_make_llm", lambda temperature: llm)
 
-    result = await graph.classify_query({
-        "question": "What is the market outlook?",
-        "classification": None,
-    })
+    result = await graph.classify_query(
+        {
+            "question": "What is the market outlook?",
+            "classification": None,
+        }
+    )
 
     assert result["classification"] == "HYBRID"
 

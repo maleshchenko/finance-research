@@ -25,7 +25,7 @@ from langchain_core.tools import tool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import DocumentType
-from app.retrieval.metric_store import MetricRecord, MetricStore
+from app.retrieval.metric_store import MetricStore
 from app.retrieval.vector_store import RetrievalFilter, VectorRetriever
 
 log = structlog.get_logger(__name__)
@@ -137,8 +137,21 @@ def build_query_metrics_tool(db: AsyncSession):
             fiscal_year_max=fiscal_year_max,
             fiscal_quarter=fiscal_quarter,
         )
-        results = [
-            {
+        results = []
+        for r in records:
+            citation = (
+                f"STRUCTURED DATA: {r.company_ticker} {r.metric_name} · "
+                f"{r.period_label} · doc:{r.document_id}"
+            )
+            if r.source_provider == "sec_companyfacts":
+                if r.source_accessions:
+                    citation += f" · SEC accession(s): {', '.join(r.source_accessions)}"
+                if r.source_urls:
+                    citation = f"[{citation}]({r.source_urls[0]})"
+            elif r.source_page:
+                citation += f" · p.{r.source_page}"
+
+            results.append({
                 "ticker": r.company_ticker,
                 "period": r.period_label,
                 "metric": r.metric_name,
@@ -148,9 +161,10 @@ def build_query_metrics_tool(db: AsyncSession):
                 "is_adjusted": r.is_adjusted,
                 "document_id": r.document_id,
                 "source_page": r.source_page,
-            }
-            for r in records
-        ]
+                "source_provider": r.source_provider,
+                "source_note": r.source_note,
+                "citation": citation,
+            })
 
         if not results:
             return json.dumps({

@@ -145,6 +145,21 @@ Instructions:
 - Omit any claim that cannot be traced to the supplied evidence or calculation result.
 """
 
+METRIC_TREND_PROMPT = """Group companies by the overall trend shown in the calculated facts.
+
+User question: {question}
+
+Verified trend facts computed from structured metrics:
+{records}
+
+Instructions:
+- Return only the overall_direction_groups object required by the response schema.
+- Place each ticker in exactly one group, matching its supplied overall_direction.
+- Do not calculate from raw values, add tickers, or output prose or metric values.
+- If revision feedback is supplied, correct the group assignments:
+{revision_feedback}
+"""
+
 GROUNDING_EVALUATOR_PROMPT = """You are an independent grounding evaluator for a financial research assistant.
 
 Check every material factual claim in the draft against ONLY the supplied retrieved evidence and
@@ -156,13 +171,15 @@ that is not present in the evidence. Interpretations must be clearly presented a
 supported by the cited facts.
 
 Accept structured-data citations when the matching ticker and metric records are present, and
-calculation citations when the matching calculation result is supplied. For financial values, match the
-company, metric, and fiscal period exactly. A value reported for Q1 does not support or contradict a
-claim about Q2. Mark an absent requested period as unsupported/data unavailable, never as
-contradicted solely because another period is present.
+calculation citations when the matching calculation result is supplied. For trend claims, treat the
+supplied calculated directions as authoritative; do not recalculate them from raw values. Verify that
+the calculation matches the same ticker and periods, then compare the claim with its direction. For
+financial values, match the company, metric, and fiscal period exactly. A value reported for Q1 does
+not support or contradict a claim about Q2. Mark an absent requested period as unsupported/data
+unavailable, never as contradicted solely because another period is present.
 
 Return only a JSON object with this exact shape:
-{{"passed": true, "issues": []}}
+{"passed": true, "issues": []}
 
 If any material claim has a grounding or citation issue, return passed=false and include a concise
 string for each issue, identifying the claim and whether it is contradicted, unsupported, or has a

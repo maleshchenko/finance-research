@@ -76,6 +76,7 @@ class DocumentSummary(BaseModel):
     id: int
     company_ticker: Optional[str]
     company_name: Optional[str]
+    source_provider: Optional[str] = None
     document_type: str
     fiscal_year: Optional[int]
     fiscal_quarter: Optional[int]
