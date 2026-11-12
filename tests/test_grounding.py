@@ -34,6 +34,7 @@ def _state():
         "citations": [],
         "grounding_status": None,
         "grounding_issues": [],
+        "unverified_draft": None,
         "error": None,
         "start_time": 0.0,
     }
@@ -49,6 +50,20 @@ def test_grounding_verdict_requires_clean_pass():
     )
     assert not passed
     assert issues == ["Warranty claim is contradicted."]
+
+    passed, issues = graph._parse_grounding_verdict(
+        json.dumps(
+            {
+                "passed": False,
+                "issues": [
+                    "GOOGL operating margin Q4 FY2023 is unsupported.",
+                    "  googl operating margin q4 fy2023 is unsupported.  ",
+                ],
+            }
+        )
+    )
+    assert not passed
+    assert issues == ["GOOGL operating margin Q4 FY2023 is unsupported."]
 
 
 @pytest.mark.parametrize("content", ["not json", '{"passed": true}'])
@@ -73,6 +88,7 @@ async def test_grounding_failure_gets_one_revision_then_passes(monkeypatch):
 
     assert result["grounding_status"] == "verified"
     assert result["grounding_issues"] == []
+    assert result["unverified_draft"] is None
     assert "two years" in result["answer"]
     assert llm.calls == 3
 
@@ -91,7 +107,8 @@ async def test_unverified_answer_is_not_returned_after_failed_revision(monkeypat
     result = await graph.verify_grounding(_state())
 
     assert result["grounding_status"] == "unverified"
-    assert result["answer"].startswith("I couldn't verify")
+    assert "should not be relied on" in result["answer"]
     assert result["grounding_issues"] == ["Claim remains unsupported."]
+    assert result["unverified_draft"] == "Still unsupported."
     assert result["citations"] == []
     assert llm.calls == 3

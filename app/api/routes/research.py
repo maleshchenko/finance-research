@@ -57,6 +57,7 @@ async def query(
         citations=result.get("citations", []),
         grounding_status=result.get("grounding_status"),
         grounding_issues=result.get("grounding_issues", []),
+        unverified_draft=result.get("unverified_draft"),
         evidence_sources=result.get("evidence_sources", []),
         tool_calls_made=result.get("tool_calls_made", []),
         elapsed_seconds=result.get("elapsed_seconds", 0),

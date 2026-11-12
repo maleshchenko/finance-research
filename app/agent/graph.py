@@ -57,6 +57,7 @@ class AgentState(TypedDict):
     citations: list[str]
     grounding_status: Optional[str]
     grounding_issues: list[str]
+    unverified_draft: Optional[str]
     error: Optional[str]
     start_time: float
 
@@ -323,7 +324,15 @@ def _parse_grounding_verdict(content: Any) -> tuple[bool, list[str]]:
     ):
         return False, ["Grounding evaluator returned a malformed verdict."]
 
-    issues = verdict["issues"]
+    issues: list[str] = []
+    seen_issues: set[str] = set()
+    for raw_issue in verdict["issues"]:
+        issue = " ".join(raw_issue.split())
+        normalized_issue = issue.casefold()
+        if issue and normalized_issue not in seen_issues:
+            issues.append(issue)
+            seen_issues.add(normalized_issue)
+
     passed = verdict["passed"] and not issues
     if not passed and not issues:
         issues = ["The evaluator did not confirm that all material claims are grounded."]
@@ -379,17 +388,18 @@ async def verify_grounding(state: AgentState) -> AgentState:
             "grounding_issues": [],
         }
 
-    log.warning("grounding_failed_after_revision", issues=issues)
+    log.warning("grounding_failed_after_revision", issue_count=len(issues))
     return {
         **revised_state,
         "citations": [],
         "answer": (
-            "I couldn't verify the generated answer against the available evidence, "
-            "even after one revision. The sources available do not support a "
-            "sufficiently grounded answer."
+            "Grounding review failed after one revision. The draft is included "
+            "separately as unverified and should not be relied on. See "
+            "`grounding_issues` for the specific evidence gaps."
         ),
         "grounding_status": "unverified",
         "grounding_issues": issues,
+        "unverified_draft": revised_answer,
     }
 
 
@@ -433,6 +443,7 @@ async def run_research_query(
         "citations": [],
         "grounding_status": None,
         "grounding_issues": [],
+        "unverified_draft": None,
         "error": None,
         "start_time": time.perf_counter(),
     }
@@ -446,6 +457,7 @@ async def run_research_query(
         "citations": final_state.get("citations", []),
         "grounding_status": final_state.get("grounding_status"),
         "grounding_issues": final_state.get("grounding_issues", []),
+        "unverified_draft": final_state.get("unverified_draft"),
         "evidence_sources": final_state.get("evidence_sources", []),
         "tool_calls_made": final_state.get("tool_calls_made", []),
         "elapsed_seconds": elapsed,

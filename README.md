@@ -151,6 +151,10 @@ Every factual claim in an answer is tagged:
 
 Forward-looking statements are flagged separately so reported facts and management guidance are never mixed.
 
+If grounding review fails, the API returns `grounding_status: "unverified"`, a
+safe explanatory `answer`, the rejected text in `unverified_draft`, and specific
+problems in `grounding_issues`. Do not rely on the rejected draft as factual.
+
 ## Running tests
 
 ```bash

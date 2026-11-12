@@ -57,6 +57,8 @@ For comparison questions across companies or periods:
 - If data is not in the knowledge base AND web search is disabled or returns nothing, say so
 - Do not fabricate numbers
 - If a metric is missing for a period, state "data not available"
+- Match evidence to the exact company, metric, and fiscal period, another quarter's
+  value neither supports nor contradicts the requested quarter
 - Non-GAAP figures must be labelled as such
 """
 
@@ -110,6 +112,10 @@ or cites a source that is not present in the evidence. Interpretations must be
 clearly presented as interpretations and supported by the cited facts.
 Accept structured-data citations when the matching ticker and metric records are
 present, and calculation citations when the matching calculation result is supplied.
+For financial values, match the company, metric, and fiscal period exactly.
+A value reported for Q1 does not support or contradict a claim about Q2.
+Mark an absent requested period as unsupported/data unavailable, never as contradicted
+solely because another period is present.
 
 Return only a JSON object with this exact shape:
 {"passed": true, "issues": []}
@@ -117,5 +123,6 @@ Return only a JSON object with this exact shape:
 If any material claim has a grounding or citation issue, return passed=false and
 include a concise string for each issue, identifying the claim and whether it is
 contradicted, unsupported, or has a citation problem. Do not flag clearly stated
-limitations or appropriately qualified uncertainty as unsupported claims.
+limitations or appropriately qualified uncertainty as unsupported claims. Emit
+at most one issue per unique company/metric/period claim, combine duplicates.
 """
