@@ -12,19 +12,23 @@ import json
 import re
 import time
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import TypedDict
 
 from app.agent.tools import build_tools
 from app.config import settings
 from app.llm import make_llm
-from app.prompts.system import CLASSIFIER_PROMPT, SYSTEM_PROMPT, SYNTHESIS_PROMPT
+from app.prompts.system import (
+    CLASSIFIER_PROMPT,
+    GROUNDING_EVALUATOR_PROMPT,
+    SYNTHESIS_PROMPT,
+    SYSTEM_PROMPT,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -51,6 +55,8 @@ class AgentState(TypedDict):
     evidence_sources: list[str]        # citation labels extracted from evidence
     answer: Optional[str]
     citations: list[str]
+    grounding_status: Optional[str]
+    grounding_issues: list[str]
     error: Optional[str]
     start_time: float
 
@@ -236,33 +242,51 @@ def _extract_sources(evidence: list[dict]) -> list[str]:
 
 # ── Node: synthesise ──────────────────────────────────────────────────────────
 
-async def synthesise(state: AgentState) -> AgentState:
-    if state.get("error") and not state.get("evidence"):
-        return {**state, "answer": f"Error: {state['error']}"}
-
-    llm = _make_llm(temperature=0.1)
-
+def _evidence_text(state: AgentState) -> tuple[str, str]:
     evidence_text = json.dumps(state.get("evidence", []), indent=2, ensure_ascii=False)[:6000]
     calc_text = json.dumps(state.get("calculations", []), indent=2, ensure_ascii=False)[:2000]
+    return evidence_text, calc_text
 
+
+async def _generate_answer(
+    state: AgentState,
+    revision_feedback: Optional[str] = None,
+) -> str:
+    evidence_text, calc_text = _evidence_text(state)
     prompt = SYNTHESIS_PROMPT.format(
         question=state["question"],
         evidence=evidence_text,
         calculations=calc_text,
         current_date=date.today().isoformat(),
     )
+    if revision_feedback:
+        prompt += (
+            "\n\nGrounding review feedback:\n"
+            f"{revision_feedback}\n"
+            "Revise the answer using only the supplied evidence and calculations. "
+            "Remove or qualify claims the evidence does not support."
+        )
 
-    response = await llm.ainvoke(
+    response = await _make_llm(temperature=0.1).ainvoke(
         [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ]
     )
-    answer = response.content
+    return response.content
 
-    # Extract citation labels from both the answer text and pre-built evidence_sources
+
+def _answer_citations(state: AgentState, answer: str) -> list[str]:
     cited = re.findall(r"\[([A-Z]+\s*·[^\]]+)\]", answer)
-    all_citations = list(dict.fromkeys(state.get("evidence_sources", []) + cited))
+    return list(dict.fromkeys(state.get("evidence_sources", []) + cited))
+
+
+async def synthesise(state: AgentState) -> AgentState:
+    if state.get("error") and not state.get("evidence"):
+        return {**state, "answer": f"Error: {state['error']}"}
+
+    answer = await _generate_answer(state)
+    all_citations = _answer_citations(state, answer)
 
     log.info(
         "synthesis_complete",
@@ -271,6 +295,86 @@ async def synthesise(state: AgentState) -> AgentState:
         elapsed=round(time.perf_counter() - state["start_time"], 2),
     )
     return {**state, "answer": answer, "citations": all_citations}
+
+
+# ── Node: grounding evaluator ─────────────────────────────────────────────────
+
+def _parse_grounding_verdict(content: Any) -> tuple[bool, list[str]]:
+    try:
+        verdict = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return False, ["Grounding evaluator returned invalid JSON."]
+
+    if (
+        not isinstance(verdict, dict)
+        or not isinstance(verdict.get("passed"), bool)
+        or not isinstance(verdict.get("issues"), list)
+        or not all(isinstance(issue, str) for issue in verdict["issues"])
+    ):
+        return False, ["Grounding evaluator returned a malformed verdict."]
+
+    issues = verdict["issues"]
+    passed = verdict["passed"] and not issues
+    if not passed and not issues:
+        issues = ["The evaluator did not confirm that all material claims are grounded."]
+    return passed, issues
+
+
+async def _evaluate_answer(state: AgentState) -> tuple[bool, list[str]]:
+    evidence_text, calc_text = _evidence_text(state)
+    review_input = json.dumps(
+        {
+            "question": state["question"],
+            "draft_answer": state.get("answer"),
+            "retrieved_evidence": evidence_text,
+            "calculations": calc_text,
+        },
+        ensure_ascii=False,
+    )
+    response = await _make_llm(temperature=0.0).ainvoke(
+        [
+            SystemMessage(content=GROUNDING_EVALUATOR_PROMPT),
+            HumanMessage(content=review_input),
+        ]
+    )
+    return _parse_grounding_verdict(response.content)
+
+
+async def verify_grounding(state: AgentState) -> AgentState:
+    if state.get("error") and not state.get("evidence"):
+        return {**state, "grounding_status": "not_evaluated", "grounding_issues": []}
+
+    passed, issues = await _evaluate_answer(state)
+    if passed:
+        return {**state, "grounding_status": "verified", "grounding_issues": []}
+
+    revised_answer = await _generate_answer(state, revision_feedback="\n".join(issues))
+    revised_state = {
+        **state,
+        "answer": revised_answer,
+        "citations": _answer_citations(state, revised_answer),
+    }
+    passed, issues = await _evaluate_answer(revised_state)
+    if passed:
+        log.info("grounding_verified_after_revision")
+        return {
+            **revised_state,
+            "grounding_status": "verified",
+            "grounding_issues": [],
+        }
+
+    log.warning("grounding_failed_after_revision", issues=issues)
+    return {
+        **revised_state,
+        "citations": [],
+        "answer": (
+            "I couldn't verify the generated answer against the available evidence, "
+            "even after one revision. The sources available do not support a "
+            "sufficiently grounded answer."
+        ),
+        "grounding_status": "unverified",
+        "grounding_issues": issues,
+    }
 
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
@@ -283,11 +387,13 @@ def build_graph(db: AsyncSession) -> Any:
     builder.add_node("classify", classify_query)
     builder.add_node("agent", _run_agent)
     builder.add_node("synthesise", synthesise)
+    builder.add_node("verify_grounding", verify_grounding)
 
     builder.add_edge(START, "classify")
     builder.add_edge("classify", "agent")
     builder.add_edge("agent", "synthesise")
-    builder.add_edge("synthesise", END)
+    builder.add_edge("synthesise", "verify_grounding")
+    builder.add_edge("verify_grounding", END)
 
     return builder.compile()
 
@@ -309,6 +415,8 @@ async def run_research_query(
         "evidence_sources": [],
         "answer": None,
         "citations": [],
+        "grounding_status": None,
+        "grounding_issues": [],
         "error": None,
         "start_time": time.perf_counter(),
     }
@@ -320,6 +428,8 @@ async def run_research_query(
         "answer": final_state.get("answer"),
         "classification": final_state.get("classification"),
         "citations": final_state.get("citations", []),
+        "grounding_status": final_state.get("grounding_status"),
+        "grounding_issues": final_state.get("grounding_issues", []),
         "evidence_sources": final_state.get("evidence_sources", []),
         "tool_calls_made": final_state.get("tool_calls_made", []),
         "elapsed_seconds": elapsed,

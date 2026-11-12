@@ -49,6 +49,14 @@ class ResearchResponse(BaseModel):
     answer: str
     classification: Optional[str]
     citations: list[str]
+    grounding_status: Optional[str] = Field(
+        None,
+        description="Whether the answer passed evidence-grounding review",
+    )
+    grounding_issues: list[str] = Field(
+        default_factory=list,
+        description="Grounding issues if the answer could not be verified",
+    )
     evidence_sources: list[str] = Field(
         default_factory=list,
         description="Citation labels of chunks actually retrieved from the knowledge base",

@@ -28,6 +28,7 @@ async def query(
     2. Retrieve relevant document chunks and/or structured metrics
     3. Perform any required calculations
     4. Synthesise a cited answer that distinguishes reported facts from interpretation
+    5. Check the answer against the evidence and revise it once if needed
 
     Answers typically take 5–30 seconds depending on complexity.
     """
@@ -54,6 +55,8 @@ async def query(
         answer=result.get("answer") or "No answer generated.",
         classification=result.get("classification"),
         citations=result.get("citations", []),
+        grounding_status=result.get("grounding_status"),
+        grounding_issues=result.get("grounding_issues", []),
         evidence_sources=result.get("evidence_sources", []),
         tool_calls_made=result.get("tool_calls_made", []),
         elapsed_seconds=result.get("elapsed_seconds", 0),
