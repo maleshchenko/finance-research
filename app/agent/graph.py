@@ -78,16 +78,73 @@ def _extract_tickers(question: str) -> list[str]:
 
 # ── Node: classify ────────────────────────────────────────────────────────────
 
-async def classify_query(state: AgentState) -> AgentState:
-    log.info("query_classification_started", question_length=len(state["question"]))
-    llm = _make_llm(temperature=0.0)
-    prompt = CLASSIFIER_PROMPT.format(question=state["question"])
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
+_VALID_CLASSIFICATIONS = {"NARRATIVE", "METRICS", "HYBRID", "DISCOVERY"}
+
+
+def _coerce_json_like(value: Any) -> Any:
+    """Best-effort conversion of LLM output into JSON-compatible Python objects."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+
+    candidates = [text]
+    if text.startswith("{") and text.endswith("}"):
+        candidates.insert(0, text)
+    elif text.startswith("[") and text.endswith("]"):
+        candidates.insert(0, text)
+
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     try:
-        parsed = json.loads(response.content)
-        classification = parsed.get("classification", "HYBRID")
-    except (json.JSONDecodeError, AttributeError):
-        classification = "HYBRID"
+        import ast
+
+        return ast.literal_eval(text)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _normalise_classification(value: Any) -> str:
+    """Accept a variety of LLM JSON/quote formatting and map to the allowed enum."""
+    if isinstance(value, dict):
+        for key in ("classification", '"classification"', "'classification'"):
+            if key in value:
+                return _normalise_classification(value[key])
+        return "HYBRID"
+
+    if isinstance(value, str):
+        candidate = value.strip().strip('"\'')
+        normalized = candidate.upper()
+        if normalized in _VALID_CLASSIFICATIONS:
+            return normalized
+
+    return "HYBRID"
+
+
+async def classify_query(state: AgentState) -> AgentState:
+    question = state.get("question") or ""
+    log.info("query_classification_started", question_length=len(question))
+    llm = _make_llm(temperature=0.0)
+    prompt = CLASSIFIER_PROMPT.format(question=question)
+    response = await llm.ainvoke([HumanMessage(content=prompt)])
+
+    parsed = _coerce_json_like(getattr(response, "content", None))
+    if isinstance(parsed, dict):
+        classification = _normalise_classification(parsed.get("classification"))
+    else:
+        classification = _normalise_classification(parsed)
 
     log.info("query_classified", classification=classification)
     return {**state, "classification": classification}

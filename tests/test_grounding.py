@@ -74,6 +74,32 @@ def test_invalid_grounding_verdict_fails_closed(content):
 
 
 @pytest.mark.asyncio
+async def test_classify_query_accepts_markdown_json(monkeypatch):
+    llm = _FakeLLM(["```json\n{\"classification\": \"METRICS\", \"reasoning\": \"Revenue question\"}\n```"])
+    monkeypatch.setattr(graph, "_make_llm", lambda temperature: llm)
+
+    result = await graph.classify_query({
+        "question": "What was Apple's revenue in Q4 2023?",
+        "classification": None,
+    })
+
+    assert result["classification"] == "METRICS"
+
+
+@pytest.mark.asyncio
+async def test_classify_query_defaults_to_hybrid_when_response_is_unparseable(monkeypatch):
+    llm = _FakeLLM(['"classification"'])
+    monkeypatch.setattr(graph, "_make_llm", lambda temperature: llm)
+
+    result = await graph.classify_query({
+        "question": "What is the market outlook?",
+        "classification": None,
+    })
+
+    assert result["classification"] == "HYBRID"
+
+
+@pytest.mark.asyncio
 async def test_grounding_failure_gets_one_revision_then_passes(monkeypatch):
     llm = _FakeLLM(
         [
