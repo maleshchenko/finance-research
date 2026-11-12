@@ -1,6 +1,11 @@
 """Unit tests for the document chunker."""
 
-from app.ingestion.chunker import TextChunk, _table_to_markdown, chunk_document
+from app.ingestion.chunker import (
+    TextChunk,
+    _split_table_markdown,
+    _table_to_markdown,
+    chunk_document,
+)
 from app.ingestion.extractor import ExtractionResult, PageResult
 
 
@@ -39,6 +44,18 @@ class TestTableToMarkdown:
         md = _table_to_markdown(table)
         assert "\n\n" not in md.split("---")[1]  # no double newlines in data rows
 
+    def test_large_tables_split_by_row_and_repeat_headers(self):
+        table = [["Metric", "Value"], *[[f"Metric {i}", str(i)] for i in range(10)]]
+
+        chunks = _split_table_markdown(table, max_chars=50)
+
+        assert len(chunks) > 1
+        assert all("| Metric | Value |" in chunk for chunk in chunks)
+        assert sum(
+            sum(f"| Metric {i} |" in chunk for i in range(10))
+            for chunk in chunks
+        ) == 10
+
 
 class TestChunkDocument:
     def test_produces_chunks(self):
@@ -67,6 +84,16 @@ class TestChunkDocument:
         )
         chunks = chunk_document(result)
         assert all(c.section_heading == "Results Of Operations" for c in chunks)
+        assert all(c.content.startswith("[SECTION: Results Of Operations]") for c in chunks)
+        assert all(c.token_count and c.token_count > 0 for c in chunks)
+
+    def test_table_chunks_have_token_counts(self):
+        table = [["Metric", "Value"], ["Revenue", "85,777"]]
+        result = _make_result([{"text": "", "tables": [table]}])
+
+        chunks = chunk_document(result)
+
+        assert chunks[0].token_count and chunks[0].token_count > 0
 
     def test_empty_pages_produce_no_chunks(self):
         result = _make_result([{"text": "   "}, {"text": ""}])

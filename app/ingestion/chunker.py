@@ -2,8 +2,8 @@
 Semantic chunker for financial documents.
 
 Financial documents require a specialised chunking strategy:
-  - Tables should not be split across chunks.
-  - Narrative text is split first at section boundaries, then by token count.
+  - Tables split only between rows, with headers repeated in each chunk.
+  - Narrative text is split first at section boundaries, then by configured size.
   - Each chunk is labelled with its source section so retrieval can
     distinguish MD&A commentary from the income statement.
 
@@ -22,10 +22,11 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+import tiktoken
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.config import settings
-from app.ingestion.extractor import ExtractionResult, PageResult, SECTION_HEADINGS
+from app.ingestion.extractor import ExtractionResult
 
 # Headings that signal the start of a new logical section within a page.
 # We look for uppercase/title-case lines that look like known section titles.
@@ -39,6 +40,8 @@ _INLINE_HEADING_RE = re.compile(
     r"|Guidance|Outlook|Operating Segment))",
     re.I | re.MULTILINE,
 )
+# cl100k_base matches the configured OpenAI embedding model; for Ollama it is an estimate.
+_TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
 
 
 @dataclass
@@ -51,7 +54,7 @@ class TextChunk:
 
 
 def _table_to_markdown(table: list[list[str]]) -> str:
-    """Render a table as a compact Markdown string so it stays in one chunk."""
+    """Render a complete table as a compact Markdown string."""
     if not table:
         return ""
     rows = []
@@ -60,6 +63,33 @@ def _table_to_markdown(table: list[list[str]]) -> str:
         if i == 0:
             rows.append("|" + "|".join("---" for _ in row) + "|")
     return "\n".join(rows)
+
+
+def _split_table_markdown(table: list[list[str]], max_chars: int) -> list[str]:
+    """Split large tables by row, repeating the header in each chunk."""
+    if not table:
+        return []
+
+    header = "| " + " | ".join(cell.replace("\n", " ") for cell in table[0]) + " |"
+    separator = "|" + "|".join("---" for _ in table[0]) + "|"
+    chunks: list[str] = []
+    rows = [header, separator]
+
+    for row in table[1:]:
+        rendered_row = "| " + " | ".join(cell.replace("\n", " ") for cell in row) + " |"
+        candidate = "\n".join([*rows, rendered_row])
+        if len(candidate) > max_chars and len(rows) > 2:
+            chunks.append("\n".join(rows))
+            rows = [header, separator]
+        rows.append(rendered_row)
+
+    if len(rows) > 2 or not chunks:
+        chunks.append("\n".join(rows))
+    return chunks
+
+
+def _token_count(text: str) -> int:
+    return len(_TOKEN_ENCODER.encode(text, disallowed_special=()))
 
 
 def _split_by_section(text: str, base_heading: Optional[str]) -> list[tuple[str, str]]:
@@ -103,7 +133,7 @@ def chunk_document(result: ExtractionResult) -> list[TextChunk]:
     Convert an ExtractionResult into a flat list of TextChunks.
 
     Strategy:
-      1. For each page with tables, emit one chunk per table (Markdown).
+      1. For each page with tables, emit Markdown chunks split at row boundaries.
       2. For each page's narrative text:
          a. Split at section heading boundaries within the page.
          b. Within each section segment, apply RecursiveCharacterTextSplitter.
@@ -125,19 +155,20 @@ def chunk_document(result: ExtractionResult) -> list[TextChunk]:
 
         # ── Table chunks (kept whole) ─────────────────────────────────────────
         for table in page.tables:
-            md = _table_to_markdown(table)
-            if not md.strip():
-                continue
-            chunks.append(
-                TextChunk(
-                    chunk_index=chunk_index,
-                    content=f"[TABLE — {page_heading or 'Financial Data'}]\n\n{md}",
-                    page_number=page_num,
-                    section_heading=page_heading,
-                    token_count=None,
+            for md in _split_table_markdown(table, settings.chunk_size):
+                if not md.strip():
+                    continue
+                content = f"[TABLE — {page_heading or 'Financial Data'}]\n\n{md}"
+                chunks.append(
+                    TextChunk(
+                        chunk_index=chunk_index,
+                        content=content,
+                        page_number=page_num,
+                        section_heading=page_heading,
+                        token_count=_token_count(content),
+                    )
                 )
-            )
-            chunk_index += 1
+                chunk_index += 1
 
         # ── Narrative text: section-aware then token-based splitting ──────────
         narrative = page.text.strip()
@@ -151,18 +182,23 @@ def chunk_document(result: ExtractionResult) -> list[TextChunk]:
             if not segment_text.strip():
                 continue
 
-            # Then split each section segment by token size
+            # Then split each section segment by configured character size.
             splits = splitter.split_text(segment_text)
             for split in splits:
                 if not split.strip():
                     continue
+                contextual_split = (
+                    f"[SECTION: {section_heading}]\n\n{split}"
+                    if section_heading and section_heading != "General"
+                    else split
+                )
                 chunks.append(
                     TextChunk(
                         chunk_index=chunk_index,
-                        content=split,
+                        content=contextual_split,
                         page_number=page_num,
                         section_heading=section_heading,
-                        token_count=None,
+                        token_count=_token_count(contextual_split),
                     )
                 )
                 chunk_index += 1
