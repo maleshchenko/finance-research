@@ -161,8 +161,18 @@ app/
   database/       SQLAlchemy models, Alembic migrations
 scripts/
   seed_demo.py    Generate and ingest synthetic reports
-tests/            30 unit tests (no DB or API key required)
+  eval_rag.py     Measure retrieval Recall@k and MRR@k
+docs/
+  ai-engineering-guide.md  Guided tour of the architecture and experiments
+tests/            Unit tests for ingestion, retrieval, metrics, and grounding
 ```
+
+## Learn the AI engineering patterns
+
+This repository is designed as a working reference, not only a finance Q&A
+demo. Follow the [AI engineering guide](docs/ai-engineering-guide.md) to trace
+a request through ingestion, retrieval, agent orchestration, grounding, and
+evaluation, with suggested experiments at each stage.
 
 ## Web search fallback
 
@@ -200,3 +210,17 @@ problems in `grounding_issues`. Do not rely on the rejected draft as factual.
 pip install -e ".[dev]"
 pytest
 ```
+
+## Evaluating narrative retrieval
+
+After applying migrations and ingesting the demo reports, run the labeled
+retrieval benchmark:
+
+```bash
+python scripts/eval_rag.py --k 8
+```
+
+It reports macro Recall@k and MRR@k for evidence-labeled guidance and narrative
+queries. The benchmark requires the configured database and embedding provider.
+New section context is included in chunks created after this change; re-ingest
+existing PDFs to apply it to already stored chunks.
