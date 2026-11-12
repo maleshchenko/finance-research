@@ -10,7 +10,7 @@ Semantic search retrieves relevant paragraphs but struggles to reconstruct a com
 
 | Question type | Strategy |
 |---|---|
-| "What did management say about margins?" | RAG — pgvector cosine search |
+| "What did management say about margins?" | Hybrid RAG — vector + PostgreSQL full-text search, fused by rank |
 | "How did revenue change over 8 quarters?" | SQL query -> Python calculation |
 | "Compare margins and explain the trend" | SQL metrics, then LLM interpretation |
 
@@ -22,6 +22,10 @@ The interpretation describes observed patterns, not causes; causal questions use
 narrative retrieval.
 SEC Company Facts records take precedence over demo/PDF metrics for covered
 periods; citations include accession numbers and calculation notes.
+
+Narrative retrieval combines pgvector similarity with PostgreSQL full-text
+search using reciprocal-rank fusion. This helps recover both semantically
+related passages and exact financial terms.
 
 ## Importing SEC metrics
 
@@ -151,7 +155,7 @@ curl -X POST http://localhost:8000/ingest/upload \
 ```
 app/
   ingestion/      PDF extraction, table-aware chunking, embedding pipeline
-  retrieval/      pgvector semantic search + typed SQL metric queries
+  retrieval/      hybrid text/vector search + typed SQL metric queries
   agent/          LangGraph graph, 5 LangChain tools
   api/routes/     POST /ingest/upload, POST /research/query, GET /documents/…
   database/       SQLAlchemy models, Alembic migrations

@@ -25,6 +25,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    literal_column,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -113,6 +115,14 @@ class DocumentChunk(Base):
             postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        Index(
+            "ix_chunks_content_fts",
+            func.to_tsvector(
+                literal_column("'simple'::regconfig"),
+                text("content || ' ' || coalesce(section_heading, '')"),
+            ),
+            postgresql_using="gin",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -133,8 +143,6 @@ class DocumentChunk(Base):
     )
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
-
-
 class FinancialMetric(Base):
     """
     A single numerical financial data point extracted from a table or filing.

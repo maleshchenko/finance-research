@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import structlog
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -29,7 +29,7 @@ log = structlog.get_logger(__name__)
 
 @dataclass
 class RetrievalFilter:
-    """Optional filters applied before cosine similarity scoring."""
+    """Optional filters applied before hybrid relevance scoring."""
 
     tickers: Optional[list[str]] = None
     document_types: Optional[list[DocumentType]] = None
@@ -53,7 +53,8 @@ class RetrievedChunk:
     page_number: Optional[int]
     section_heading: Optional[str]
     content: str
-    similarity_score: float
+    similarity_score: Optional[float]
+    retrieval_score: float = 0.0
 
     # Convenience property used in prompt assembly
     @property
@@ -71,11 +72,10 @@ class RetrievedChunk:
 
 class VectorRetriever:
     """
-    Wraps pgvector cosine-distance search with metadata pre-filtering.
+    Combines pgvector cosine search and PostgreSQL full-text search.
 
-    The query is embedded, then we use the `<=>` operator (cosine distance)
-    via a raw SQL expression because SQLAlchemy doesn't expose pgvector
-    operators natively.
+    Candidate lists are merged with reciprocal-rank fusion, which avoids
+    comparing incomparable vector-similarity and full-text rank scores.
     """
 
     def __init__(self) -> None:
@@ -93,18 +93,19 @@ class VectorRetriever:
         query: str,
         filters: Optional[RetrievalFilter] = None,
     ) -> list[RetrievedChunk]:
-        """Embed `query`, apply filters, return top-k chunks by cosine similarity."""
+        """Return top-k chunks from fused semantic and lexical candidate lists."""
         if filters is None:
             filters = RetrievalFilter()
 
         top_k = filters.top_k or settings.similarity_top_k
-        min_sim = filters.min_similarity if filters.min_similarity is not None else settings.effective_similarity_threshold
+        min_sim = (
+            filters.min_similarity
+            if filters.min_similarity is not None
+            else settings.effective_similarity_threshold
+        )
+        candidate_limit = max(top_k * 3, 20)
 
-        # Embed the query
-        query_embedding = await self._get_embeddings().aembed_query(query)
-        embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
-
-        # Build filter conditions on Document
+        # Build the shared metadata filters.
         conditions = []
         if filters.tickers:
             conditions.append(Document.company_ticker.in_(filters.tickers))
@@ -117,15 +118,28 @@ class VectorRetriever:
             conditions.append(Document.fiscal_year <= filters.fiscal_year_max)
         if filters.fiscal_quarter is not None:
             conditions.append(Document.fiscal_quarter == filters.fiscal_quarter)
+        if filters.section_heading_contains:
+            conditions.append(
+                DocumentChunk.section_heading.ilike(f"%{filters.section_heading_contains}%")
+            )
 
-        # Cosine similarity = 1 - cosine_distance
-        # Use literal_column so SQLAlchemy can call .label() and .desc() on it
-        from sqlalchemy import literal_column
+        # The same expression is indexed by the migration's GIN index.
+        search_config = literal_column("'simple'::regconfig")
+        searchable_text = (
+            DocumentChunk.content
+            + literal_column("' '")
+            + func.coalesce(DocumentChunk.section_heading, literal_column("''"))
+        )
+        search_vector = func.to_tsvector(search_config, searchable_text)
+        search_query = func.plainto_tsquery(search_config, query)
+
+        # Semantic candidates.
+        query_embedding = await self._get_embeddings().aembed_query(query)
+        embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
         similarity_expr = literal_column(
             f"1 - (embedding <=> CAST('{embedding_str}' AS vector))"
         )
-
-        stmt = (
+        base_columns = (
             select(
                 DocumentChunk,
                 Document.company_ticker,
@@ -133,42 +147,90 @@ class VectorRetriever:
                 Document.document_type,
                 Document.fiscal_year,
                 Document.fiscal_quarter,
-                similarity_expr.label("similarity"),
             )
             .join(Document, DocumentChunk.document_id == Document.id)
-            .where(
-                and_(
-                    *conditions,
-                    similarity_expr >= min_sim,
-                )
-            )
-            .order_by(similarity_expr.desc())
-            .limit(top_k)
         )
 
-        result = await db.execute(stmt)
-        rows = result.all()
-
-        chunks = [
-            RetrievedChunk(
-                chunk_id=row.DocumentChunk.id,
-                document_id=row.DocumentChunk.document_id,
-                company_ticker=row.company_ticker,
-                company_name=row.company_name,
-                document_type=row.document_type,
-                fiscal_year=row.fiscal_year,
-                fiscal_quarter=row.fiscal_quarter,
-                page_number=row.DocumentChunk.page_number,
-                section_heading=row.DocumentChunk.section_heading,
-                content=row.DocumentChunk.content,
-                similarity_score=float(row.similarity),
-            )
-            for row in rows
+        vector_stmt = (
+            base_columns
+            .add_columns(similarity_expr.label("similarity"))
+            .where(and_(similarity_expr >= min_sim, *conditions))
+            .order_by(similarity_expr.desc())
+            .limit(candidate_limit)
+        )
+        vector_result = await db.execute(vector_stmt)
+        vector_chunks = [
+            _to_retrieved_chunk(row, similarity_score=float(row.similarity))
+            for row in vector_result.all()
         ]
+
+        # Lexical candidates help with exact terms, tickers, and financial
+        # vocabulary that may not be close in embedding space.
+        lexical_score = func.ts_rank_cd(search_vector, search_query)
+        lexical_stmt = (
+            base_columns
+            .add_columns(lexical_score.label("lexical_score"))
+            .where(and_(search_vector.op("@@")(search_query), *conditions))
+            .order_by(lexical_score.desc())
+            .limit(candidate_limit)
+        )
+        lexical_result = await db.execute(lexical_stmt)
+        lexical_chunks = [
+            _to_retrieved_chunk(row, similarity_score=None)
+            for row in lexical_result.all()
+        ]
+
+        chunks = reciprocal_rank_fusion(vector_chunks, lexical_chunks, top_k=top_k)
 
         log.info(
             "retrieval_complete",
             query_preview=query[:60],
             chunks_returned=len(chunks),
+            semantic_candidates=len(vector_chunks),
+            lexical_candidates=len(lexical_chunks),
         )
         return chunks
+
+
+def _to_retrieved_chunk(row, *, similarity_score: Optional[float]) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=row.DocumentChunk.id,
+        document_id=row.DocumentChunk.document_id,
+        company_ticker=row.company_ticker,
+        company_name=row.company_name,
+        document_type=row.document_type,
+        fiscal_year=row.fiscal_year,
+        fiscal_quarter=row.fiscal_quarter,
+        page_number=row.DocumentChunk.page_number,
+        section_heading=row.DocumentChunk.section_heading,
+        content=row.DocumentChunk.content,
+        similarity_score=similarity_score,
+    )
+
+
+def reciprocal_rank_fusion(
+    semantic_chunks: list[RetrievedChunk],
+    lexical_chunks: list[RetrievedChunk],
+    *,
+    top_k: int,
+    rank_constant: int = 60,
+) -> list[RetrievedChunk]:
+    """Merge ranked result lists using reciprocal-rank fusion."""
+    fused: dict[int, RetrievedChunk] = {}
+    scores: dict[int, float] = {}
+
+    for ranked_chunks in (semantic_chunks, lexical_chunks):
+        for rank, chunk in enumerate(ranked_chunks, start=1):
+            existing = fused.get(chunk.chunk_id)
+            if existing is None:
+                fused[chunk.chunk_id] = chunk
+            elif existing.similarity_score is None and chunk.similarity_score is not None:
+                existing.similarity_score = chunk.similarity_score
+            scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + (
+                1.0 / (rank_constant + rank)
+            )
+
+    ranked = sorted(fused.values(), key=lambda chunk: scores[chunk.chunk_id], reverse=True)
+    for chunk in ranked:
+        chunk.retrieval_score = scores[chunk.chunk_id]
+    return ranked[:top_k]

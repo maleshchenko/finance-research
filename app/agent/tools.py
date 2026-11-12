@@ -57,6 +57,10 @@ def build_retrieve_narrative_tool(db: AsyncSession):
         fiscal_year_min: Annotated[Optional[int], "Earliest fiscal year"] = None,
         fiscal_year_max: Annotated[Optional[int], "Latest fiscal year"] = None,
         top_k: Annotated[int, "Max number of chunks to return"] = 6,
+        section_heading_contains: Annotated[
+            Optional[str],
+            "Restrict results to a filing section, e.g. 'Risk Factors' or 'Guidance'",
+        ] = None,
     ) -> str:
         """
         Retrieve narrative text from financial reports using semantic search.
@@ -68,13 +72,18 @@ def build_retrieve_narrative_tool(db: AsyncSession):
         """
         dtype_objs: list[DocumentType] | None = None
         if document_types:
-            dtype_objs = [DocumentType(t) for t in document_types if t in DocumentType.__members__.values()]
+            dtype_objs = [
+                DocumentType(t)
+                for t in document_types
+                if t in DocumentType.__members__.values()
+            ]
 
         filters = RetrievalFilter(
             tickers=tickers,
             document_types=dtype_objs,
             fiscal_year_min=fiscal_year_min,
             fiscal_year_max=fiscal_year_max,
+            section_heading_contains=section_heading_contains,
             top_k=top_k,
         )
         chunks = await _retriever.retrieve(db, query, filters)
@@ -82,7 +91,12 @@ def build_retrieve_narrative_tool(db: AsyncSession):
             {
                 "citation": c.citation_label,
                 "section": c.section_heading,
-                "similarity": round(c.similarity_score, 3),
+                "similarity": (
+                    round(c.similarity_score, 3)
+                    if c.similarity_score is not None
+                    else None
+                ),
+                "retrieval_score": round(c.retrieval_score, 5),
                 "content": c.content,
                 "chunk_id": c.chunk_id,
             }
@@ -271,6 +285,7 @@ def build_list_documents_tool(db: AsyncSession):
         that a specific company/period is present before running other tools.
         """
         from sqlalchemy import select
+
         from app.database.models import Document
 
         stmt = select(
