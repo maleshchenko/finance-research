@@ -45,7 +45,7 @@ EVAL_CASES = [
         "question": "What was Apple's total revenue in Q1 FY2023?",
         "keywords": ["AAPL", "94"],          # $94.8B
         "any_keywords": ["revenue", "Revenue"],
-        "tools_used": ["retrieve_narrative"],
+        "tools_used": ["retrieve_narrative", "query_metrics"],
         "skip_if_missing": ["AAPL"],
     },
     {
@@ -53,7 +53,7 @@ EVAL_CASES = [
         "question": "What was Microsoft's diluted EPS in Q2 FY2023?",
         "keywords": ["MSFT", "2.45"],
         "any_keywords": ["EPS", "earnings per share", "diluted"],
-        "tools_used": ["retrieve_narrative"],
+        "tools_used": ["retrieve_narrative", "query_metrics"],
         "skip_if_missing": ["MSFT"],
     },
     {
@@ -61,7 +61,7 @@ EVAL_CASES = [
         "question": "What was Alphabet's operating margin in Q3 FY2023?",
         "keywords": ["GOOGL"],
         "any_keywords": ["margin", "operating", "%"],
-        "tools_used": ["retrieve_narrative"],
+        "tools_used": ["retrieve_narrative", "query_metrics"],
         "skip_if_missing": ["GOOGL"],
     },
 
@@ -71,7 +71,7 @@ EVAL_CASES = [
         "question": "Compare operating margins for AAPL, MSFT, and GOOGL across all quarters of FY2023.",
         "keywords": ["AAPL", "MSFT", "GOOGL"],
         "any_keywords": ["margin", "operating", "Q1", "Q2", "Q3", "Q4"],
-        "tools_used": ["retrieve_narrative"],
+        "tools_used": ["query_metrics"],
         "skip_if_missing": ["AAPL", "MSFT", "GOOGL"],
     },
     {
@@ -79,7 +79,7 @@ EVAL_CASES = [
         "question": "Compare total revenue between Apple and Microsoft for Q4 FY2023.",
         "keywords": ["AAPL", "MSFT"],
         "any_keywords": ["revenue", "Revenue", "117", "62"],   # ~$117B AAPL, ~$62B MSFT
-        "tools_used": ["retrieve_narrative"],
+        "tools_used": ["retrieve_narrative", "query_metrics"],
         "skip_if_missing": ["AAPL", "MSFT"],
     },
 
