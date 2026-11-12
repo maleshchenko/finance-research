@@ -110,7 +110,7 @@ app.add_middleware(
 )
 
 
-_REQUEST_TIMEOUT = 480
+_REQUEST_TIMEOUT = 600
 
 
 @app.middleware("http")
