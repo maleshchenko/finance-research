@@ -12,9 +12,38 @@ Semantic search retrieves relevant paragraphs but struggles to reconstruct a com
 |---|---|
 | "What did management say about margins?" | RAG — pgvector cosine search |
 | "How did revenue change over 8 quarters?" | SQL query -> Python calculation |
-| "Compare margins and explain the trend" | Both, then LLM synthesis |
+| "Compare margins and explain the trend" | SQL metrics, then LLM interpretation |
 
-The LLM never guesses numerical values. It retrieves or calculates them, then synthesises a cited answer.
+Explicit operating-margin comparisons for a fiscal year use structured SQL
+metrics and deterministic tables. Numeric-only questions skip LLM synthesis and
+grounding review; adding "explain the trend" requests structured LLM trend grouping
+that is checked against deterministic quarter calculations before being rendered.
+The interpretation describes observed patterns, not causes; causal questions use
+narrative retrieval.
+SEC Company Facts records take precedence over demo/PDF metrics for covered
+periods; citations include accession numbers and calculation notes.
+
+## Importing SEC metrics
+
+The demo seed creates synthetic values. Import FY2023 SEC Company Facts before
+asking for authoritative numbers. A dry run only previews the records:
+
+```bash
+docker compose exec \
+  -e SEC_USER_AGENT="finance-research/0.1 your-name@example.com" \
+  api python -m scripts.import_sec_metrics \
+  --tickers AAPL MSFT GOOGL --fiscal-year 2023 --dry-run
+
+# Import or refresh the SEC rows (omit --dry-run).
+docker compose exec \
+  -e SEC_USER_AGENT="finance-research/0.1 your-name@example.com" \
+  api python -m scripts.import_sec_metrics \
+  --tickers AAPL MSFT GOOGL --fiscal-year 2023
+```
+
+The dry run does not write to PostgreSQL. Re-running the importer updates its
+SEC records. `python scripts/seed_demo.py --reseed` refreshes demo PDFs but
+preserves SEC-sourced documents and their metrics.
 
 ## Stack
 
@@ -42,8 +71,8 @@ python scripts/seed_demo.py
 # 4. Ask a question
 curl -s -X POST http://localhost:8000/research/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "Compare operating margins for AAPL, MSFT, and GOOGL across FY2023"}' \
-  | jq .answer
+  -d '{"question":"Compare operating margins for AAPL, MSFT, and GOOGL across FY2023 and explain the trend."}' \
+  | jq '{answer, grounding_status, unverified_draft, grounding_issues}'
 ```
 
 ### With Ollama (fully local, no API key)
@@ -69,11 +98,17 @@ docker compose --profile ollama up --build
 ### Example console output with local Ollama:
 
 ```
-curl -X POST http://localhost:8000/research/query \
-     -H "Content-Type: application/json" \
-     -d '{"question": "Compare operating margins for AAPL, MSFT, and GOOGL across all four quarters of FY2023"}'
+curl -s -X POST http://localhost:8000/research/query \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Compare operating margins for AAPL, MSFT, and GOOGL across FY2023 and explain the trend."}' \
+  | jq '{answer, grounding_status, unverified_draft, grounding_issues}'
 
-{"answer":"**Operating Margin Comparison Across Companies and Periods**\n\n### **Companies and Periods Compared**\n\n| Company | Q4 FY2023 | Q1 FY2023 | Q3 FY2023 | Q2 FY2023 |\n| --- | --- | --- | --- | --- |\n| AAPL | 33.4% | 32.0% | 33.4% | 24.6% |\n| MSFT |  |  |  |  |\n| GOOGL | 27.7% | 30.6% | 29.3% | 24.6% |\n\n### **Data Gaps and Limitations**\n\n* MSFT's Q1 FY2023 operating margin is not reported in the provided evidence.\n* Web search was attempted to retrieve MSFT's Q1 FY2023 operating margin, but no reliable data was found.\n\n### **Calculated Results**\n\n| Company | Q4 FY2023 | Q1 FY2023 | Q3 FY2023 | Q2 FY2023 |\n| --- | --- | --- | --- | --- |\n| AAPL | 33.4% | 32.0% | 33.4% | 24.6% |\n| MSFT |  |  |  |  |\n| GOOGL | 27.7% | 30.6% | 29.3% | 24.6% |\n\n### **Citations**\n\n* AAPL · FY2023 Q4 · p.1: \"Operating income of 39.1 billion reflects an operating margin of 33.4%, compared to 32.2% in the prior-year period.\"\n* AAPL · FY2023 Q1 · p.1: \"Operating income of 30.3 billion reflects an operating margin of 32.0%, compared to 30.8% in the prior-year period.\"\n* GOOGL · FY2023 Q4 · p.1: \"Operating income of 23.9 billion reflects an operating margin of 27.7%, compared to 26.5% in the prior-year period.\"\n* GOOGL · FY2023 Q1 · p.1: \"Operating income of 21.3 billion reflects an operating margin of 30.6%, compared to 29.4% in the prior-year period.\"\n* GOOGL · FY2023 Q3 · p.1: \"Operating income of 21.8 billion reflects an operating margin of 29.3%, compared to 28.1% in the prior-year period.\"\n* GOOGL · FY2023 Q2 · p.1: \"Operating income of 17.1 billion reflects an operating margin of 24.6%, compared to 23.4% in the prior-year period.\"\n\n### **Interpretation**\n\nThe operating margins for AAPL, MSFT, and GOOGL vary across different periods. AAPL's operating margin is consistently higher than GOOGL's, while MSFT's operating margin is not reported for Q1 FY2023.\n\n### **Web Source**\n\nMSFT's Q1 FY2023 operating margin was not found in the provided evidence or through a web search.","classification":"HYBRID","citations":[],"tool_calls_made":["search_documents","query_metrics"],"elapsed_seconds":207.28,"error":null}
+{
+  "answer": "### Operating Margin — FY2023\n\n| Company | Period | Value |\n|---|---|---:|\n| AAPL | FY2023 Q1 | 30.7424% [STRUCTURED DATA: AAPL operating_margin · FY2023 Q1 · doc:130 · SEC accession(s): 0000320193-23-000006](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)|\n| AAPL | FY2023 Q2 | 29.86% [STRUCTURED DATA: AAPL operating_margin · FY2023 Q2 · doc:131 · SEC accession(s): 0000320193-23-000064](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)|\n| AAPL | FY2023 Q3 | 28.1159% [STRUCTURED DATA: AAPL operating_margin · FY2023 Q3 · doc:132 · SEC accession(s): 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)|\n| AAPL | FY2023 Q4 | 30.1336% [STRUCTURED DATA: AAPL operating_margin · FY2023 Q4 · doc:133 · SEC accession(s): 0000320193-23-000106, 0000320193-23-000006, 0000320193-23-000064, 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)|\n| MSFT | FY2023 Q1 | 42.9312% [STRUCTURED DATA: MSFT operating_margin · FY2023 Q1 · doc:134 · SEC accession(s): 0001564590-22-035087](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)|\n| MSFT | FY2023 Q2 | 38.6733% [STRUCTURED DATA: MSFT operating_margin · FY2023 Q2 · doc:135 · SEC accession(s): 0001564590-23-000733](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)|\n| MSFT | FY2023 Q3 | 42.2877% [STRUCTURED DATA: MSFT operating_margin · FY2023 Q3 · doc:136 · SEC accession(s): 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)|\n| MSFT | FY2023 Q4 | 43.165% [STRUCTURED DATA: MSFT operating_margin · FY2023 Q4 · doc:137 · SEC accession(s): 0000950170-23-035122, 0001564590-22-035087, 0001564590-23-000733, 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)|\n| GOOGL | FY2023 Q1 | 24.9545% [STRUCTURED DATA: GOOGL operating_margin · FY2023 Q1 · doc:138 · SEC accession(s): 0001652044-23-000045](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)|\n| GOOGL | FY2023 Q2 | 29.2719% [STRUCTURED DATA: GOOGL operating_margin · FY2023 Q2 · doc:139 · SEC accession(s): 0001652044-23-000070](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)|\n| GOOGL | FY2023 Q3 | 27.8291% [STRUCTURED DATA: GOOGL operating_margin · FY2023 Q3 · doc:140 · SEC accession(s): 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)|\n| GOOGL | FY2023 Q4 | 27.4557% [STRUCTURED DATA: GOOGL operating_margin · FY2023 Q4 · doc:141 · SEC accession(s): 0001652044-24-000022, 0001652044-23-000045, 0001652044-23-000070, 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)|\n\nConsistent structured values available for 12 of 12 cells.\nData notes: Operating margin = operating income / revenue × 100. Q4 line items are FY amounts minus Q1–Q3; operating margin is calculated as Q4 operating income / Q4 revenue × 100.\n\n### Calculated trend summary\n\n- AAPL: decreased from FY2023 Q1 to FY2023 Q2; decreased from FY2023 Q2 to FY2023 Q3; increased from FY2023 Q3 to FY2023 Q4; overall decreased from [AAPL FY2023 Q1] to [AAPL FY2023 Q4]. [AAPL FY2023 Q1] [AAPL FY2023 Q2] [AAPL FY2023 Q3] [AAPL FY2023 Q4]\n- MSFT: decreased from FY2023 Q1 to FY2023 Q2; increased from FY2023 Q2 to FY2023 Q3; increased from FY2023 Q3 to FY2023 Q4; overall increased from [MSFT FY2023 Q1] to [MSFT FY2023 Q4]. [MSFT FY2023 Q1] [MSFT FY2023 Q2] [MSFT FY2023 Q3] [MSFT FY2023 Q4]\n- GOOGL: increased from FY2023 Q1 to FY2023 Q2; decreased from FY2023 Q2 to FY2023 Q3; decreased from FY2023 Q3 to FY2023 Q4; overall increased from [GOOGL FY2023 Q1] to [GOOGL FY2023 Q4]. [GOOGL FY2023 Q1] [GOOGL FY2023 Q2] [GOOGL FY2023 Q3] [GOOGL FY2023 Q4]\n\n### LLM synthesis\n\nOverall, operating margins increased for MSFT and GOOGL; decreased for AAPL. [AAPL FY2023 Q1] [AAPL FY2023 Q4] [MSFT FY2023 Q1] [MSFT FY2023 Q4] [GOOGL FY2023 Q1] [GOOGL FY2023 Q4]",
+  "grounding_status": "verified",
+  "unverified_draft": null,
+  "grounding_issues": []
+}
 ```
 
 > **Note on embedding dimensions:** the `VECTOR_DIMENSION` setting must match
