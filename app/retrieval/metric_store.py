@@ -41,12 +41,29 @@ class MetricRecord:
     is_adjusted: bool
     document_id: int
     source_page: Optional[int]
+    source_provider: str | None = None
+    source_accessions: tuple[str, ...] = ()
+    source_urls: tuple[str, ...] = ()
+    source_note: str | None = None
 
     @property
     def period_label(self) -> str:
         if self.fiscal_quarter:
             return f"FY{self.fiscal_year} Q{self.fiscal_quarter}"
         return f"FY{self.fiscal_year}"
+
+
+def _prefer_sec_records(
+    records: list[MetricRecord],
+    sec_periods: set[tuple[str, int, int | None]],
+) -> list[MetricRecord]:
+    return [
+        record
+        for record in records
+        if (record.company_ticker, record.fiscal_year, record.fiscal_quarter)
+        not in sec_periods
+        or record.source_provider == "sec_companyfacts"
+    ]
 
 
 class MetricStore:
@@ -93,7 +110,8 @@ class MetricStore:
             conditions.append(FinancialMetric.is_adjusted == False)  # noqa: E712
 
         stmt = (
-            select(FinancialMetric)
+            select(FinancialMetric, Document.extra_metadata)
+            .join(Document, Document.id == FinancialMetric.document_id)
             .where(and_(*conditions))
             .order_by(
                 FinancialMetric.company_ticker,
@@ -103,30 +121,72 @@ class MetricStore:
         )
 
         result = await db.execute(stmt)
-        rows = result.scalars().all()
+        rows = result.all()
 
-        records = [
-            MetricRecord(
-                company_ticker=r.company_ticker or "",
-                fiscal_year=r.fiscal_year,
-                fiscal_quarter=r.fiscal_quarter,
-                period_end_date=r.period_end_date,
-                metric_name=r.metric_name,
-                value=r.value,
-                unit=r.unit,
-                segment=r.segment or "Total",
-                is_adjusted=r.is_adjusted,
-                document_id=r.document_id,
-                source_page=r.source_page,
+        records: list[MetricRecord] = []
+        for metric, document_metadata in rows:
+            metadata = document_metadata if isinstance(document_metadata, dict) else {}
+            provenance = metadata.get("metric_provenance")
+            provenance = provenance if isinstance(provenance, dict) else {}
+            metric_provenance = provenance.get(metric.metric_name)
+            metric_provenance = (
+                metric_provenance if isinstance(metric_provenance, dict) else {}
             )
-            for r in rows
-        ]
+            accessions = metric_provenance.get("source_accessions", [])
+            urls = metric_provenance.get("source_urls", [])
+            records.append(
+                MetricRecord(
+                    company_ticker=metric.company_ticker or "",
+                    fiscal_year=metric.fiscal_year,
+                    fiscal_quarter=metric.fiscal_quarter,
+                    period_end_date=metric.period_end_date,
+                    metric_name=metric.metric_name,
+                    value=metric.value,
+                    unit=metric.unit,
+                    segment=metric.segment or "Total",
+                    is_adjusted=metric.is_adjusted,
+                    document_id=metric.document_id,
+                    source_page=metric.source_page,
+                    source_provider=metadata.get("source_provider"),
+                    source_accessions=tuple(accessions)
+                    if isinstance(accessions, list)
+                    else (),
+                    source_urls=tuple(urls) if isinstance(urls, list) else (),
+                    source_note=metric_provenance.get("calculation"),
+                )
+            )
+
+        source_conditions = [Document.company_ticker.in_(tickers)]
+        if fiscal_year_min is not None:
+            source_conditions.append(Document.fiscal_year >= fiscal_year_min)
+        if fiscal_year_max is not None:
+            source_conditions.append(Document.fiscal_year <= fiscal_year_max)
+        if fiscal_quarter is not None:
+            source_conditions.append(Document.fiscal_quarter == fiscal_quarter)
+        source_result = await db.execute(
+            select(
+                Document.company_ticker,
+                Document.fiscal_year,
+                Document.fiscal_quarter,
+                Document.extra_metadata,
+            ).where(and_(*source_conditions))
+        )
+        sec_periods = {
+            (ticker, fiscal_year, fiscal_quarter)
+            for ticker, fiscal_year, fiscal_quarter, metadata in source_result.all()
+            if ticker is not None
+            and fiscal_year is not None
+            and isinstance(metadata, dict)
+            and metadata.get("source_provider") == "sec_companyfacts"
+        }
+        records = _prefer_sec_records(records, sec_periods)
 
         log.info(
             "metric_query_complete",
             tickers=tickers,
             metrics=metric_names,
             records=len(records),
+            sec_preferred_periods=len(sec_periods),
         )
         return records
 

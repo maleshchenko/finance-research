@@ -151,6 +151,10 @@ def _make_fake_pdf(ticker: str, quarter: int, year: int = 2023) -> bytes:
     return buf.getvalue()
 
 
+def _is_sec_sourced_document(document: dict) -> bool:
+    return document.get("source_provider") == "sec_companyfacts"
+
+
 async def seed(reseed: bool = False):
     print("🌱 Seeding demo financial data...")
     print(f"   API: {BASE_URL}")
@@ -167,6 +171,13 @@ async def seed(reseed: bool = False):
             if resp.status_code == 200:
                 existing = resp.json()
                 for doc in existing:
+                    if _is_sec_sourced_document(doc):
+                        print(
+                            "   Preserving SEC metrics for "
+                            f"{doc.get('company_ticker', '')} "
+                            f"Q{doc.get('fiscal_quarter', '')} FY{doc.get('fiscal_year', '')}"
+                        )
+                        continue
                     doc_id = doc.get("id") or doc.get("document_id")
                     if doc_id:
                         del_resp = await client.delete(f"/documents/{doc_id}")
