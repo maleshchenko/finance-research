@@ -83,6 +83,23 @@ curl -X POST http://localhost:8000/research/query \
 
 Interactive API docs: **http://localhost:8000/docs**
 
+## Watching live logs
+
+Follow API startup, request, retrieval, synthesis, and grounding-review events:
+
+```bash
+docker compose logs -f --tail=100 api
+```
+
+Each request gets a `request_id`, included in the structured log events and
+returned in the `X-Request-ID` response header. Match events with the same ID to
+follow a request through the agent. When running Uvicorn directly, the same
+events are printed in the terminal:
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
 ## Uploading a real PDF
 
 ```bash

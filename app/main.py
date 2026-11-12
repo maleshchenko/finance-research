@@ -13,6 +13,7 @@ import logging
 import sys
 import time
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 import asyncio
 
@@ -40,6 +41,7 @@ def _configure_logging() -> None:
     is_tty = sys.stderr.isatty()
 
     processors: list = [
+        structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
@@ -107,34 +109,45 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["X-Request-ID"],
 )
 
 
-_REQUEST_TIMEOUT = 600
+_REQUEST_TIMEOUT = 1200
 
 
 @app.middleware("http")
 async def timing_and_timeout(request: Request, call_next):
+    request_id = uuid4().hex
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(request_id=request_id)
     t0 = time.perf_counter()
+    log.info("http_request_started", method=request.method, path=request.url.path)
     try:
-        response = await asyncio.wait_for(call_next(request), timeout=_REQUEST_TIMEOUT)
-    except asyncio.TimeoutError:
-        elapsed = round((time.perf_counter() - t0) * 1000)
-        log.warning("request_timeout", path=request.url.path, ms=elapsed)
-        return JSONResponse(
-            status_code=504,
-            content={"detail": f"Request timed out after {_REQUEST_TIMEOUT}s."},
-        )
-    elapsed = round((time.perf_counter() - t0) * 1000)
-    response.headers["X-Response-Time-Ms"] = str(elapsed)
-    log.info(
-        "http_request",
-        method=request.method,
-        path=request.url.path,
-        status=response.status_code,
-        ms=elapsed,
-    )
-    return response
+        try:
+            response = await asyncio.wait_for(call_next(request), timeout=_REQUEST_TIMEOUT)
+        except asyncio.TimeoutError:
+            elapsed = round((time.perf_counter() - t0) * 1000)
+            log.warning("request_timeout", path=request.url.path, ms=elapsed)
+            response = JSONResponse(
+                status_code=504,
+                content={"detail": f"Request timed out after {_REQUEST_TIMEOUT}s."},
+            )
+        else:
+            elapsed = round((time.perf_counter() - t0) * 1000)
+            response.headers["X-Response-Time-Ms"] = str(elapsed)
+            log.info(
+                "http_request",
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                ms=elapsed,
+            )
+
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        structlog.contextvars.clear_contextvars()
 
 
 # ── Error handling ────────────────────────────────────────────────────────────

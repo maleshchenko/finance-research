@@ -78,6 +78,7 @@ def _extract_tickers(question: str) -> list[str]:
 # ── Node: classify ────────────────────────────────────────────────────────────
 
 async def classify_query(state: AgentState) -> AgentState:
+    log.info("query_classification_started", question_length=len(state["question"]))
     llm = _make_llm(temperature=0.0)
     prompt = CLASSIFIER_PROMPT.format(question=state["question"])
     response = await llm.ainvoke([HumanMessage(content=prompt)])
@@ -87,7 +88,7 @@ async def classify_query(state: AgentState) -> AgentState:
     except (json.JSONDecodeError, AttributeError):
         classification = "HYBRID"
 
-    log.info("query_classified", classification=classification, question=state["question"][:80])
+    log.info("query_classified", classification=classification)
     return {**state, "classification": classification}
 
 
@@ -100,6 +101,7 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     2. Inject retrieved evidence into the prompt.
     3. Run the ReAct agent for any additional tool calls.
     """
+    log.info("agent_started", classification=state.get("classification"))
     tools = build_tools(db)
     search_tool = next((t for t in tools if t.name == "retrieve_narrative"), None)
 
@@ -173,6 +175,7 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
     input_messages = [HumanMessage(content=question_with_context)]
 
     try:
+        log.info("react_agent_started", available_tools=[tool.name for tool in tools])
         result = await agent.ainvoke(
             {"messages": input_messages},
             config={"recursion_limit": settings.agent_max_iterations * 2},
@@ -213,6 +216,12 @@ async def run_agent(state: AgentState, db: AsyncSession) -> AgentState:
                 else:
                     evidence.append(parsed)
 
+    log.info(
+        "agent_completed",
+        tool_calls=tool_calls,
+        evidence_items=len(evidence),
+        calculations=len(calculations),
+    )
     return {
         **state,
         "messages": messages,
@@ -285,6 +294,7 @@ async def synthesise(state: AgentState) -> AgentState:
     if state.get("error") and not state.get("evidence"):
         return {**state, "answer": f"Error: {state['error']}"}
 
+    log.info("synthesis_started", evidence_items=len(state.get("evidence", [])))
     answer = await _generate_answer(state)
     all_citations = _answer_citations(state, answer)
 
@@ -342,19 +352,25 @@ async def _evaluate_answer(state: AgentState) -> tuple[bool, list[str]]:
 
 async def verify_grounding(state: AgentState) -> AgentState:
     if state.get("error") and not state.get("evidence"):
+        log.info("grounding_check_skipped", reason="agent_error_without_evidence")
         return {**state, "grounding_status": "not_evaluated", "grounding_issues": []}
 
+    log.info("grounding_check_started", attempt=1)
     passed, issues = await _evaluate_answer(state)
+    log.info("grounding_check_completed", attempt=1, passed=passed, issue_count=len(issues))
     if passed:
         return {**state, "grounding_status": "verified", "grounding_issues": []}
 
+    log.info("grounding_revision_started", issue_count=len(issues))
     revised_answer = await _generate_answer(state, revision_feedback="\n".join(issues))
     revised_state = {
         **state,
         "answer": revised_answer,
         "citations": _answer_citations(state, revised_answer),
     }
+    log.info("grounding_check_started", attempt=2)
     passed, issues = await _evaluate_answer(revised_state)
+    log.info("grounding_check_completed", attempt=2, passed=passed, issue_count=len(issues))
     if passed:
         log.info("grounding_verified_after_revision")
         return {
