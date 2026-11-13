@@ -15,8 +15,24 @@ class _FakeLLM:
         self.calls += 1
         return SimpleNamespace(content=next(self.responses))
 
+    def with_structured_output(self, _schema, *, method):
+        assert method == "json_schema"
+        return self
+
 
 def _state():
+    answer = graph.serialize_answer(
+        {
+            "summary": "The product warranty is five years.",
+            "claims": [
+                {
+                    "text": "The product warranty is five years.",
+                    "classification": "REPORTED",
+                    "citations": ["ACME · FY2024 Annual · p.4"],
+                }
+            ],
+        }
+    )
     return {
         "question": "What is the warranty period?",
         "classification": "NARRATIVE",
@@ -30,7 +46,7 @@ def _state():
         ],
         "calculations": [],
         "evidence_sources": ["ACME · FY2024 Annual · p.4"],
-        "answer": "The product warranty is five years.",
+        "answer": answer,
         "citations": [],
         "grounding_status": None,
         "grounding_issues": [],
@@ -102,6 +118,36 @@ async def test_grounding_evaluator_uses_json_schema_output(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_synthesis_requests_and_returns_structured_answer_schema(monkeypatch):
+    class _StructuredFakeLLM:
+        def with_structured_output(self, schema, *, method):
+            assert schema is graph.StructuredAnswer
+            assert method == "json_schema"
+            return self
+
+        async def ainvoke(self, _messages):
+            return {
+                "summary": "The warranty is two years.",
+                "claims": [
+                    {
+                        "text": "The warranty is two years.",
+                        "classification": "REPORTED",
+                        "citations": ["ACME · FY2024 Annual · p.4"],
+                    }
+                ],
+                "limitations": [],
+            }
+
+    monkeypatch.setattr(graph, "_make_llm", lambda temperature: _StructuredFakeLLM())
+
+    answer = await graph._generate_answer(_state())
+    parsed_answer = json.loads(answer)
+
+    assert set(parsed_answer) == {"summary", "claims", "limitations"}
+    assert parsed_answer["claims"][0]["citations"] == ["ACME · FY2024 Annual · p.4"]
+
+
+@pytest.mark.asyncio
 async def test_classify_query_accepts_markdown_json(monkeypatch):
     llm = _FakeLLM(['```json\n{"classification": "METRICS", "reasoning": "Revenue question"}\n```'])
     monkeypatch.setattr(graph, "_make_llm", lambda temperature: llm)
@@ -136,7 +182,18 @@ async def test_grounding_failure_gets_one_revision_then_passes(monkeypatch):
     llm = _FakeLLM(
         [
             json.dumps({"passed": False, "issues": ["Five years contradicts the source."]}),
-            "The product warranty is two years. [ACME · FY2024 Annual · p.4]",
+            graph.serialize_answer(
+                {
+                    "summary": "The product warranty is two years.",
+                    "claims": [
+                        {
+                            "text": "The product warranty is two years.",
+                            "classification": "REPORTED",
+                            "citations": ["ACME · FY2024 Annual · p.4"],
+                        }
+                    ],
+                }
+            ),
             json.dumps({"passed": True, "issues": []}),
         ]
     )
@@ -147,7 +204,9 @@ async def test_grounding_failure_gets_one_revision_then_passes(monkeypatch):
     assert result["grounding_status"] == "verified"
     assert result["grounding_issues"] == []
     assert result["unverified_draft"] is None
-    assert "two years" in result["answer"]
+    parsed_answer = json.loads(result["answer"])
+    assert parsed_answer["claims"][0]["text"] == "The product warranty is two years."
+    assert result["citations"] == ["ACME · FY2024 Annual · p.4"]
     assert llm.calls == 3
 
 
@@ -156,7 +215,18 @@ async def test_unverified_answer_is_not_returned_after_failed_revision(monkeypat
     llm = _FakeLLM(
         [
             json.dumps({"passed": False, "issues": ["Claim is unsupported."]}),
-            "Still unsupported.",
+            graph.serialize_answer(
+                {
+                    "summary": "Still unsupported.",
+                    "claims": [
+                        {
+                            "text": "Still unsupported.",
+                            "classification": "REPORTED",
+                            "citations": ["ACME · FY2024 Annual · p.4"],
+                        }
+                    ],
+                }
+            ),
             json.dumps({"passed": False, "issues": ["Claim remains unsupported."]}),
         ]
     )
@@ -165,8 +235,43 @@ async def test_unverified_answer_is_not_returned_after_failed_revision(monkeypat
     result = await graph.verify_grounding(_state())
 
     assert result["grounding_status"] == "unverified"
-    assert "should not be relied on" in result["answer"]
+    parsed_answer = json.loads(result["answer"])
+    assert "should not be relied on" in parsed_answer["summary"]
+    assert parsed_answer["limitations"][0] == "Grounding review failed after one revision."
     assert result["grounding_issues"] == ["Claim remains unsupported."]
-    assert result["unverified_draft"] == "Still unsupported."
+    assert json.loads(result["unverified_draft"])["summary"] == "Still unsupported."
     assert result["citations"] == []
     assert llm.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_agent_error_uses_structured_answer_shape():
+    state = {**_state(), "error": "Provider unavailable.", "evidence": []}
+
+    result = await graph.synthesise(state)
+    parsed_answer = json.loads(result["answer"])
+
+    assert set(parsed_answer) == {"summary", "claims", "limitations"}
+    assert parsed_answer["claims"] == []
+    assert parsed_answer["limitations"] == ["Provider unavailable."]
+
+
+def test_structured_answer_rejects_missing_citations_and_extra_fields():
+    with pytest.raises(ValueError):
+        graph.serialize_answer(
+            {
+                "summary": "A claim without citations.",
+                "claims": [
+                    {
+                        "text": "A claim without citations.",
+                        "classification": "REPORTED",
+                        "citations": [],
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(ValueError):
+        graph.serialize_answer(
+            {"summary": "Valid summary.", "unexpected": "field"}
+        )

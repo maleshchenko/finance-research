@@ -20,6 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.answer import AnswerClaim, StructuredAnswer, parse_answer, serialize_answer
 from app.agent.tools import build_tools
 from app.config import settings
 from app.llm import make_llm
@@ -570,17 +571,23 @@ async def _generate_answer(
             "Remove or qualify claims the evidence does not support."
         )
 
-    response = await _make_llm(temperature=0.1).ainvoke(
+    llm = _make_llm(temperature=0.1)
+    with_structured_output = getattr(llm, "with_structured_output", None)
+    if not callable(with_structured_output):
+        raise RuntimeError("The configured LLM does not support structured JSON answers.")
+    llm = with_structured_output(StructuredAnswer, method="json_schema")
+    response = await llm.ainvoke(
         [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ]
     )
-    return response.content
+    return serialize_answer(getattr(response, "content", response))
 
 
 def _answer_citations(state: AgentState, answer: str) -> list[str]:
-    cited = re.findall(r"\[([A-Z]+\s*·[^\]]+)\]", answer)
+    parsed = parse_answer(answer)
+    cited = [citation for claim in parsed.claims for citation in claim.citations]
     return list(dict.fromkeys(state.get("evidence_sources", []) + cited))
 
 
@@ -639,6 +646,11 @@ def _render_metric_answer(
                 issues.append(f"Conflicting structured records for {ticker} {period}.")
                 continue
 
+            if not references:
+                lines.append(f"| {ticker} | {period} | Value withheld; no citation available |")
+                issues.append(f"No source citation available for {ticker} {period}.")
+                continue
+
             available_cells += 1
             value, unit = next(iter(values))
             lines.append(
@@ -670,6 +682,100 @@ def _render_metric_answer(
     )
 
 
+def _metric_claims(
+    request: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> list[AnswerClaim]:
+    records_by_cell: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        records_by_cell.setdefault((record["ticker"], record["period"]), []).append(record)
+
+    claims: list[AnswerClaim] = []
+    for ticker in request["tickers"]:
+        for quarter in request["quarters"]:
+            period = f"FY{request['fiscal_year']} Q{quarter}"
+            candidates = records_by_cell.get((ticker, period), [])
+            values = {(float(record["value"]), record.get("unit")) for record in candidates}
+            citations = list(
+                dict.fromkeys(
+                    record["citation"]
+                    for record in candidates
+                    if record.get("citation")
+                )
+            )
+            if len(values) != 1 or not citations:
+                continue
+
+            value, unit = next(iter(values))
+            notes = list(
+                dict.fromkeys(
+                    record["source_note"]
+                    for record in candidates
+                    if record.get("source_note")
+                    and (
+                        period.endswith("Q4")
+                        or not re.search(r"\bQ4\b", record["source_note"], re.I)
+                    )
+                )
+            )
+            claim_text = (
+                f"{ticker} operating margin for {period} is "
+                f"{_format_metric_value(value, unit)}."
+            )
+            if notes:
+                claim_text += " " + " ".join(notes)
+            calculated = any(
+                re.search(r"\b(derived|calculated|computed)\b", note, re.I)
+                for note in notes
+            )
+            classification = "CALCULATED" if calculated else "REPORTED"
+            claims.append(
+                AnswerClaim(
+                    text=claim_text,
+                    classification=classification,
+                    citations=citations,
+                )
+            )
+    return claims
+
+
+def _metric_trend_claims(
+    request: dict[str, Any],
+    records: list[dict[str, Any]],
+    trend_facts: list[dict[str, Any]],
+) -> list[AnswerClaim]:
+    periods = [f"FY{request['fiscal_year']} Q{quarter}" for quarter in request["quarters"]]
+    claims: list[AnswerClaim] = []
+    for trend in trend_facts:
+        ticker = trend["ticker"]
+        citations = list(
+            dict.fromkeys(
+                record["citation"]
+                for record in records
+                if record["ticker"] == ticker
+                and record["period"] in periods
+                and record.get("citation")
+            )
+        )
+        if not citations:
+            continue
+        changes = [
+            f"{change['direction']} from {change['from']} to {change['to']}"
+            for change in trend["period_changes"]
+        ]
+        claims.append(
+            AnswerClaim(
+                text=(
+                    f"{ticker} operating margin " + "; ".join(changes)
+                    + f"; overall {trend['overall_direction']} from {periods[0]} to {periods[-1]}."
+                ),
+                classification="CALCULATED",
+                citations=citations,
+            )
+        )
+    return claims
+
+
 async def _generate_metric_explanation(
     state: AgentState,
     revision_feedback: str = "",
@@ -678,7 +784,7 @@ async def _generate_metric_explanation(
     if request is None:
         raise RuntimeError("Structured metric results have no associated request.")
 
-    trend_facts, source_refs_by_ticker = _calculate_metric_trends(
+    trend_facts, _ = _calculate_metric_trends(
         request,
         state.get("structured_metric_records", []),
     )
@@ -755,12 +861,7 @@ async def _generate_metric_explanation(
         clauses.append(f"{verb} {names}")
 
     explanation = "Overall, operating margins " + "; ".join(clauses) + "."
-    source_refs = [
-        source_ref
-        for ticker in request["tickers"]
-        for source_ref in (source_refs_by_ticker[ticker][0], source_refs_by_ticker[ticker][-1])
-    ]
-    return f"{explanation} {' '.join(source_refs)}", []
+    return explanation, []
 
 
 async def synthesise(state: AgentState) -> AgentState:
@@ -768,13 +869,16 @@ async def synthesise(state: AgentState) -> AgentState:
         request = state.get("structured_metric_request")
         if request is None:
             raise RuntimeError("Structured metric results have no associated request.")
+        records = state.get("structured_metric_records", [])
         table, citations, status, issues = _render_metric_answer(
             request,
-            state.get("structured_metric_records", []),
+            records,
         )
+        answer_claims = _metric_claims(request, records)
+        limitations = list(issues)
+        answer_summary = f"Operating margin results for FY{request['fiscal_year']}."
         result = {
             **state,
-            "answer": table,
             "citations": citations,
             "grounding_status": status,
             "grounding_issues": issues,
@@ -786,17 +890,17 @@ async def synthesise(state: AgentState) -> AgentState:
         if request.get("include_explanation") and status == "verified":
             trend_facts, _ = _calculate_metric_trends(
                 request,
-                state.get("structured_metric_records", []),
+                records,
             )
             summary = _render_metric_trend_summary(trend_facts)
+            answer_claims.extend(_metric_trend_claims(request, records, trend_facts))
             result.update(
-                answer=f"{table}\n\n{summary}",
                 structured_metrics_summary=summary,
             )
             log.info(
                 "metric_trend_synthesis_started",
                 provider=settings.llm_provider,
-                records=len(state.get("structured_metric_records", [])),
+                records=len(records),
             )
             explanation, trend_issues = await _generate_metric_explanation(result)
             if trend_issues:
@@ -809,9 +913,16 @@ async def synthesise(state: AgentState) -> AgentState:
                     revision_feedback="\n".join(trend_issues),
                 )
             if explanation is not None:
+                answer_summary = explanation
                 result.update(
-                    answer=f"{table}\n\n{summary}\n\n### LLM synthesis\n\n{explanation}",
                     metric_explanation=explanation,
+                )
+                answer_claims.append(
+                    AnswerClaim(
+                        text=explanation,
+                        classification="INTERPRETATION",
+                        citations=citations,
+                    )
                 )
                 log.info(
                     "metric_trend_synthesis_complete",
@@ -819,28 +930,45 @@ async def synthesise(state: AgentState) -> AgentState:
                 )
             else:
                 result.update(
-                    answer=(
-                        f"{table}\n\n{summary}\n\n"
-                        "LLM synthesis was withheld because it did not match the "
-                        "calculated trend directions."
-                    ),
                     grounding_status="partial",
                     grounding_issues=trend_issues,
+                )
+                limitations.append(
+                    "LLM trend interpretation was withheld because it did not match "
+                    "the calculated directions."
                 )
                 log.warning(
                     "metric_trend_synthesis_withheld",
                     issue_count=len(trend_issues),
                 )
         elif request.get("include_explanation"):
+            limitations.append(
+                "Trend interpretation was omitted because structured metric data is incomplete."
+            )
             log.info(
                 "metric_trend_synthesis_skipped",
                 reason="structured_data_incomplete",
                 status=status,
             )
+        result["answer"] = serialize_answer(
+            {
+                "summary": answer_summary,
+                "claims": answer_claims,
+                "limitations": list(dict.fromkeys(limitations)),
+            }
+        )
         return result
 
     if state.get("error") and not state.get("evidence"):
-        return {**state, "answer": f"Error: {state['error']}"}
+        return {
+            **state,
+            "answer": serialize_answer(
+                {
+                    "summary": "The research request could not be completed.",
+                    "limitations": [str(state["error"])],
+                }
+            ),
+        }
 
     log.info("synthesis_started", evidence_items=len(state.get("evidence", [])))
     answer = await _generate_answer(state)
@@ -962,10 +1090,14 @@ async def verify_grounding(state: AgentState) -> AgentState:
     return {
         **revised_state,
         "citations": [],
-        "answer": (
-            "Grounding review failed after one revision. The draft is included "
-            "separately as unverified and should not be relied on. See "
-            "`grounding_issues` for the specific evidence gaps."
+        "answer": serialize_answer(
+            {
+                "summary": "The draft could not be verified and should not be relied on.",
+                "limitations": [
+                    "Grounding review failed after one revision.",
+                    *issues,
+                ],
+            }
         ),
         "grounding_status": "unverified",
         "grounding_issues": issues,

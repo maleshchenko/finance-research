@@ -51,6 +51,33 @@ def test_parse_trend_explanation_request():
     assert request["include_explanation"] is True
 
 
+def test_metric_without_source_citation_is_withheld_from_answer_claims():
+    request = {
+        "tickers": ["AAPL"],
+        "metric_name": "operating_margin",
+        "fiscal_year": 2023,
+        "quarters": [1],
+        "include_explanation": False,
+    }
+    records = [
+        {
+            "ticker": "AAPL",
+            "period": "FY2023 Q1",
+            "value": 30.0,
+            "unit": "percent",
+            "citation": None,
+        }
+    ]
+
+    table, citations, status, issues = graph._render_metric_answer(request, records)
+
+    assert "Value withheld; no citation available" in table
+    assert citations == []
+    assert status == "insufficient_data"
+    assert issues == ["No source citation available for AAPL FY2023 Q1."]
+    assert graph._metric_claims(request, records) == []
+
+
 def test_explanatory_margin_question_stays_on_narrative_path():
     assert (
         graph._parse_metric_request("Explain why operating margins changed for AAPL in FY2023")
@@ -155,9 +182,15 @@ async def test_numeric_comparison_uses_sec_rows_without_llm_or_narrative_retriev
 
     assert state["grounding_status"] == "verified"
     assert len(state["citations"]) == 12
-    assert "Consistent structured values available for 12 of 12 cells." in state["answer"]
-    assert "SEC sourced; Q4 is derived from annual less Q1–Q3." in state["answer"]
-    assert "[[STRUCTURED DATA:" not in state["answer"]
+    answer = json.loads(state["answer"])
+    assert set(answer) == {"summary", "claims", "limitations"}
+    assert len(answer["claims"]) == 12
+    assert all(claim["citations"] for claim in answer["claims"])
+    assert any(
+        "Q4 is derived from annual less Q1–Q3." in claim["text"]
+        for claim in answer["claims"]
+    )
+    assert "| Company | Period | Value |" in state["structured_metrics_table"]
     assert state["tool_calls_made"] == ["query_metrics"]
 
 
@@ -219,15 +252,22 @@ async def test_explanation_request_runs_llm_without_changing_metric_table(monkey
     state = await graph.synthesise(_deterministic_metric_state(question))
     table = state["structured_metrics_table"]
     state = await graph.verify_grounding(state)
+    answer = json.loads(state["answer"])
 
     assert state["grounding_status"] == "verified"
-    assert state["answer"].startswith(table)
-    assert "### Calculated trend summary" in state["answer"]
-    assert "GOOGL: decreased from FY2023 Q1 to FY2023 Q2" in state["answer"]
-    assert "overall increased" in state["answer"]
-    assert "### LLM synthesis" in state["answer"]
-    assert "Overall, operating margins increased for AAPL, MSFT, and GOOGL." in state["answer"]
-    assert "[AAPL FY2023 Q1]" in state["answer"]
+    assert table == state["structured_metrics_table"]
+    assert set(answer) == {"summary", "claims", "limitations"}
+    assert any(
+        claim["classification"] == "CALCULATED"
+        and "GOOGL operating margin decreased from FY2023 Q1 to FY2023 Q2" in claim["text"]
+        for claim in answer["claims"]
+    )
+    assert any(
+        claim["classification"] == "INTERPRETATION"
+        and "Overall, operating margins increased for AAPL, MSFT, and GOOGL." == claim["text"]
+        for claim in answer["claims"]
+    )
+    assert "[AAPL FY2023 Q1]" not in state["answer"]
     assert len(state["citations"]) == 12
 
 
@@ -253,11 +293,14 @@ async def test_incorrect_llm_direction_groups_are_withheld_but_trends_are_preser
     state = await graph.synthesise(_deterministic_metric_state(question))
     table = state["structured_metrics_table"]
     state = await graph.verify_grounding(state)
+    answer = json.loads(state["answer"])
 
     assert state["grounding_status"] == "partial"
-    assert state["answer"].startswith(table)
-    assert "### Calculated trend summary" in state["answer"]
-    assert "LLM synthesis was withheld" in state["answer"]
+    assert state["structured_metrics_table"] == table
+    assert any(
+        "LLM trend interpretation was withheld" in limitation
+        for limitation in answer["limitations"]
+    )
     assert state["grounding_issues"]
     assert state["unverified_draft"] is None
     assert len(state["citations"]) == 12

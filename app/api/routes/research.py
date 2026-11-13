@@ -7,6 +7,7 @@ import time
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.answer import serialize_answer
 from app.agent.graph import run_research_query
 from app.api.schemas import ResearchRequest, ResearchResponse
 from app.database.models import QueryLog
@@ -52,7 +53,13 @@ async def query(
     await db.flush()
 
     return ResearchResponse(
-        answer=result.get("answer") or "No answer generated.",
+        answer=result.get("answer")
+        or serialize_answer(
+            {
+                "summary": "No answer was generated.",
+                "limitations": ["The agent returned no answer."],
+            }
+        ),
         classification=result.get("classification"),
         citations=result.get("citations", []),
         grounding_status=result.get("grounding_status"),

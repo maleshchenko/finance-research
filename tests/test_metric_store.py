@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from app.retrieval.metric_store import MetricRecord, _prefer_sec_records
 
 

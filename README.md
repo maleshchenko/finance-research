@@ -76,7 +76,7 @@ python scripts/seed_demo.py
 curl -s -X POST http://localhost:8000/research/query \
   -H "Content-Type: application/json" \
   -d '{"question":"Compare operating margins for AAPL, MSFT, and GOOGL across FY2023 and explain the trend."}' \
-  | jq '{answer, grounding_status, unverified_draft, grounding_issues}'
+  | jq '.answer | fromjson'
 ```
 
 ### With Ollama (fully local, no API key)
@@ -99,7 +99,10 @@ docker compose --profile ollama up --build
 # 4. Same seed + query commands as above
 ```
 
-### Example console output with local Ollama:
+### Historical text-form output (before the structured-answer API)
+
+The transcript below documents the previous Markdown answer format; current clients
+should parse `answer` as JSON as described above.
 
 ```
 curl -s -X POST http://localhost:8000/research/query \
@@ -108,10 +111,142 @@ curl -s -X POST http://localhost:8000/research/query \
   | jq '{answer, grounding_status, unverified_draft, grounding_issues}'
 
 {
-  "answer": "### Operating Margin — FY2023\n\n| Company | Period | Value |\n|---|---|---:|\n| AAPL | FY2023 Q1 | 30.7424% [STRUCTURED DATA: AAPL operating_margin · FY2023 Q1 · doc:130 · SEC accession(s): 0000320193-23-000006](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)|\n| AAPL | FY2023 Q2 | 29.86% [STRUCTURED DATA: AAPL operating_margin · FY2023 Q2 · doc:131 · SEC accession(s): 0000320193-23-000064](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)|\n| AAPL | FY2023 Q3 | 28.1159% [STRUCTURED DATA: AAPL operating_margin · FY2023 Q3 · doc:132 · SEC accession(s): 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)|\n| AAPL | FY2023 Q4 | 30.1336% [STRUCTURED DATA: AAPL operating_margin · FY2023 Q4 · doc:133 · SEC accession(s): 0000320193-23-000106, 0000320193-23-000006, 0000320193-23-000064, 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)|\n| MSFT | FY2023 Q1 | 42.9312% [STRUCTURED DATA: MSFT operating_margin · FY2023 Q1 · doc:134 · SEC accession(s): 0001564590-22-035087](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)|\n| MSFT | FY2023 Q2 | 38.6733% [STRUCTURED DATA: MSFT operating_margin · FY2023 Q2 · doc:135 · SEC accession(s): 0001564590-23-000733](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)|\n| MSFT | FY2023 Q3 | 42.2877% [STRUCTURED DATA: MSFT operating_margin · FY2023 Q3 · doc:136 · SEC accession(s): 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)|\n| MSFT | FY2023 Q4 | 43.165% [STRUCTURED DATA: MSFT operating_margin · FY2023 Q4 · doc:137 · SEC accession(s): 0000950170-23-035122, 0001564590-22-035087, 0001564590-23-000733, 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)|\n| GOOGL | FY2023 Q1 | 24.9545% [STRUCTURED DATA: GOOGL operating_margin · FY2023 Q1 · doc:138 · SEC accession(s): 0001652044-23-000045](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)|\n| GOOGL | FY2023 Q2 | 29.2719% [STRUCTURED DATA: GOOGL operating_margin · FY2023 Q2 · doc:139 · SEC accession(s): 0001652044-23-000070](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)|\n| GOOGL | FY2023 Q3 | 27.8291% [STRUCTURED DATA: GOOGL operating_margin · FY2023 Q3 · doc:140 · SEC accession(s): 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)|\n| GOOGL | FY2023 Q4 | 27.4557% [STRUCTURED DATA: GOOGL operating_margin · FY2023 Q4 · doc:141 · SEC accession(s): 0001652044-24-000022, 0001652044-23-000045, 0001652044-23-000070, 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)|\n\nConsistent structured values available for 12 of 12 cells.\nData notes: Operating margin = operating income / revenue × 100. Q4 line items are FY amounts minus Q1–Q3; operating margin is calculated as Q4 operating income / Q4 revenue × 100.\n\n### Calculated trend summary\n\n- AAPL: decreased from FY2023 Q1 to FY2023 Q2; decreased from FY2023 Q2 to FY2023 Q3; increased from FY2023 Q3 to FY2023 Q4; overall decreased from [AAPL FY2023 Q1] to [AAPL FY2023 Q4]. [AAPL FY2023 Q1] [AAPL FY2023 Q2] [AAPL FY2023 Q3] [AAPL FY2023 Q4]\n- MSFT: decreased from FY2023 Q1 to FY2023 Q2; increased from FY2023 Q2 to FY2023 Q3; increased from FY2023 Q3 to FY2023 Q4; overall increased from [MSFT FY2023 Q1] to [MSFT FY2023 Q4]. [MSFT FY2023 Q1] [MSFT FY2023 Q2] [MSFT FY2023 Q3] [MSFT FY2023 Q4]\n- GOOGL: increased from FY2023 Q1 to FY2023 Q2; decreased from FY2023 Q2 to FY2023 Q3; decreased from FY2023 Q3 to FY2023 Q4; overall increased from [GOOGL FY2023 Q1] to [GOOGL FY2023 Q4]. [GOOGL FY2023 Q1] [GOOGL FY2023 Q2] [GOOGL FY2023 Q3] [GOOGL FY2023 Q4]\n\n### LLM synthesis\n\nOverall, operating margins increased for MSFT and GOOGL; decreased for AAPL. [AAPL FY2023 Q1] [AAPL FY2023 Q4] [MSFT FY2023 Q1] [MSFT FY2023 Q4] [GOOGL FY2023 Q1] [GOOGL FY2023 Q4]",
-  "grounding_status": "verified",
-  "unverified_draft": null,
-  "grounding_issues": []
+  "summary": "Overall, operating margins increased for MSFT and GOOGL; decreased for AAPL.",
+  "claims": [
+    {
+      "text": "AAPL operating margin for FY2023 Q1 is 30.7424%. Operating margin = operating income / revenue × 100.",
+      "classification": "REPORTED",
+      "citations": [
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q1 · doc:130 · SEC accession(s): 0000320193-23-000006](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)"
+      ]
+    },
+    {
+      "text": "AAPL operating margin for FY2023 Q2 is 29.86%. Operating margin = operating income / revenue × 100.",
+      "classification": "REPORTED",
+      "citations": [
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q2 · doc:131 · SEC accession(s): 0000320193-23-000064](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)"
+      ]
+    },
+    {
+      "text": "AAPL operating margin for FY2023 Q3 is 28.1159%. Operating margin = operating income / revenue × 100.",
+      "classification": "REPORTED",
+      "citations": [
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q3 · doc:132 · SEC accession(s): 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)"
+      ]
+    },
+    {
+      "text": "AAPL operating margin for FY2023 Q4 is 30.1336%. Q4 line items are FY amounts minus Q1–Q3; operating margin is calculated as Q4 operating income / Q4 revenue × 100.",
+      "classification": "CALCULATED",
+      "citations": [
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q4 · doc:133 · SEC accession(s): 0000320193-23-000106, 0000320193-23-000006, 0000320193-23-000064, 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)"
+      ]
+    },
+    {
+      "text": "MSFT operating margin for FY2023 Q1 is 42.9312%. Operating margin = operating income / revenue × 100.",
+      "classification": "REPORTED",
+      "citations": [
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q1 · doc:134 · SEC accession(s): 0001564590-22-035087](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)"
+      ]
+    },
+    {
+      "text": "MSFT operating margin for FY2023 Q2 is 38.6733%. Operating margin = operating income / revenue × 100.",
+      "classification": "REPORTED",
+      "citations": [
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q2 · doc:135 · SEC accession(s): 0001564590-23-000733](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)"
+      ]
+    },
+    {
+      "text": "MSFT operating margin for FY2023 Q3 is 42.2877%. Operating margin = operating income / revenue × 100.",
+      "classification": "REPORTED",
+      "citations": [
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q3 · doc:136 · SEC accession(s): 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)"
+      ]
+    },
+    {
+      "text": "MSFT operating margin for FY2023 Q4 is 43.165%. Q4 line items are FY amounts minus Q1–Q3; operating margin is calculated as Q4 operating income / Q4 revenue × 100.",
+      "classification": "CALCULATED",
+      "citations": [
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q4 · doc:137 · SEC accession(s): 0000950170-23-035122, 0001564590-22-035087, 0001564590-23-000733, 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)"
+      ]
+    },
+    {
+      "text": "GOOGL operating margin for FY2023 Q1 is 24.9545%. Operating margin = operating income / revenue × 100.",
+      "classification": "REPORTED",
+      "citations": [
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q1 · doc:138 · SEC accession(s): 0001652044-23-000045](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)"
+      ]
+    },
+    {
+      "text": "GOOGL operating margin for FY2023 Q2 is 29.2719%. Operating margin = operating income / revenue × 100.",
+      "classification": "REPORTED",
+      "citations": [
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q2 · doc:139 · SEC accession(s): 0001652044-23-000070](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)"
+      ]
+    },
+    {
+      "text": "GOOGL operating margin for FY2023 Q3 is 27.8291%. Operating margin = operating income / revenue × 100.",
+      "classification": "REPORTED",
+      "citations": [
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q3 · doc:140 · SEC accession(s): 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)"
+      ]
+    },
+    {
+      "text": "GOOGL operating margin for FY2023 Q4 is 27.4557%. Q4 line items are FY amounts minus Q1–Q3; operating margin is calculated as Q4 operating income / Q4 revenue × 100.",
+      "classification": "CALCULATED",
+      "citations": [
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q4 · doc:141 · SEC accession(s): 0001652044-24-000022, 0001652044-23-000045, 0001652044-23-000070, 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)"
+      ]
+    },
+    {
+      "text": "AAPL operating margin decreased from FY2023 Q1 to FY2023 Q2; decreased from FY2023 Q2 to FY2023 Q3; increased from FY2023 Q3 to FY2023 Q4; overall decreased from FY2023 Q1 to FY2023 Q4.",
+      "classification": "CALCULATED",
+      "citations": [
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q1 · doc:130 · SEC accession(s): 0000320193-23-000006](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)",
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q2 · doc:131 · SEC accession(s): 0000320193-23-000064](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)",
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q3 · doc:132 · SEC accession(s): 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)",
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q4 · doc:133 · SEC accession(s): 0000320193-23-000106, 0000320193-23-000006, 0000320193-23-000064, 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)"
+      ]
+    },
+    {
+      "text": "MSFT operating margin decreased from FY2023 Q1 to FY2023 Q2; increased from FY2023 Q2 to FY2023 Q3; increased from FY2023 Q3 to FY2023 Q4; overall increased from FY2023 Q1 to FY2023 Q4.",
+      "classification": "CALCULATED",
+      "citations": [
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q1 · doc:134 · SEC accession(s): 0001564590-22-035087](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)",
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q2 · doc:135 · SEC accession(s): 0001564590-23-000733](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)",
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q3 · doc:136 · SEC accession(s): 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)",
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q4 · doc:137 · SEC accession(s): 0000950170-23-035122, 0001564590-22-035087, 0001564590-23-000733, 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)"
+      ]
+    },
+    {
+      "text": "GOOGL operating margin increased from FY2023 Q1 to FY2023 Q2; decreased from FY2023 Q2 to FY2023 Q3; decreased from FY2023 Q3 to FY2023 Q4; overall increased from FY2023 Q1 to FY2023 Q4.",
+      "classification": "CALCULATED",
+      "citations": [
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q1 · doc:138 · SEC accession(s): 0001652044-23-000045](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)",
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q2 · doc:139 · SEC accession(s): 0001652044-23-000070](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)",
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q3 · doc:140 · SEC accession(s): 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)",
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q4 · doc:141 · SEC accession(s): 0001652044-24-000022, 0001652044-23-000045, 0001652044-23-000070, 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)"
+      ]
+    },
+    {
+      "text": "Overall, operating margins increased for MSFT and GOOGL; decreased for AAPL.",
+      "classification": "INTERPRETATION",
+      "citations": [
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q1 · doc:130 · SEC accession(s): 0000320193-23-000006](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)",
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q2 · doc:131 · SEC accession(s): 0000320193-23-000064](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)",
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q3 · doc:132 · SEC accession(s): 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)",
+        "[STRUCTURED DATA: AAPL operating_margin · FY2023 Q4 · doc:133 · SEC accession(s): 0000320193-23-000106, 0000320193-23-000006, 0000320193-23-000064, 0000320193-23-000077](https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json)",
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q1 · doc:134 · SEC accession(s): 0001564590-22-035087](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)",
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q2 · doc:135 · SEC accession(s): 0001564590-23-000733](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)",
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q3 · doc:136 · SEC accession(s): 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)",
+        "[STRUCTURED DATA: MSFT operating_margin · FY2023 Q4 · doc:137 · SEC accession(s): 0000950170-23-035122, 0001564590-22-035087, 0001564590-23-000733, 0000950170-23-014423](https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json)",
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q1 · doc:138 · SEC accession(s): 0001652044-23-000045](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)",
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q2 · doc:139 · SEC accession(s): 0001652044-23-000070](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)",
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q3 · doc:140 · SEC accession(s): 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)",
+        "[STRUCTURED DATA: GOOGL operating_margin · FY2023 Q4 · doc:141 · SEC accession(s): 0001652044-24-000022, 0001652044-23-000045, 0001652044-23-000070, 0001652044-23-000094](https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json)"
+      ]
+    }
+  ],
+  "limitations": []
 }
 ```
 
@@ -121,6 +256,20 @@ curl -s -X POST http://localhost:8000/research/query \
 > recreate the database.
 
 Interactive API docs: **http://localhost:8000/docs**
+
+## JSON answer payload
+
+The API response itself is JSON, and its `answer` field is a JSON-serialized string.
+Parse that string with `jq '.answer | fromjson'` (or `json.loads(response["answer"])`
+in Python). The parsed object always has:
+
+- `summary`: concise answer summary
+- `claims`: evidence-backed claims, each with a `text`, `classification`, and non-empty
+  `citations` list
+- `limitations`: data gaps and qualifications
+
+The allowed claim classifications are `REPORTED`, `CALCULATED`, `INTERPRETATION`, and
+`WEB SOURCE`. `unverified_draft`, when present, uses the same JSON format.
 
 ## Watching live logs
 
@@ -192,7 +341,8 @@ The agent only triggers web search after confirming via `list_documents` that lo
 
 ## Citation format
 
-Every factual claim in an answer is tagged:
+Every factual claim appears in the answer's `claims` array with its classification
+and citation labels:
 
 - `[AAPL · FY2024 Q3 · p.4]` — text retrieved from a document chunk
 - `[STRUCTURED DATA: AAPL metrics table]` — value from the SQL metrics table
@@ -201,8 +351,8 @@ Every factual claim in an answer is tagged:
 Forward-looking statements are flagged separately so reported facts and management guidance are never mixed.
 
 If grounding review fails, the API returns `grounding_status: "unverified"`, a
-safe explanatory `answer`, the rejected text in `unverified_draft`, and specific
-problems in `grounding_issues`. Do not rely on the rejected draft as factual.
+safe JSON-formatted `answer`, the rejected JSON answer in `unverified_draft`, and
+specific problems in `grounding_issues`. Do not rely on the rejected draft as factual.
 
 ## Running tests
 

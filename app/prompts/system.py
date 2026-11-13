@@ -78,11 +78,9 @@ When citing web results:
 - Forward-looking statements must be clearly marked as guidance or management expectations.
 
 ## Response structure
-For comparison questions across companies or periods:
-1. Provide a structured comparison table if at least 2 entities are being compared
-2. List key findings with citations
-3. Note limitations (missing data, non-GAAP adjustments, web-only sources, restatements)
-4. Clearly flag forward-looking management guidance
+The final synthesis is emitted using a JSON schema with `summary`, `claims`, and `limitations`.
+For comparisons, include one evidence-backed claim per company/metric/period and flag guidance,
+missing data, non-GAAP adjustments, and restatements in the appropriate claim or limitation.
 
 ## Integrity and safety requirements
 - If data is not in the knowledge base and web search is disabled or returns nothing, say so
@@ -133,16 +131,21 @@ Calculated results (only if derived from retrieved evidence):
 
 Instructions:
 - Treat the evidence as the only admissible support for factual claims.
-- Structure the answer clearly with headings if comparing multiple entities or periods.
-- Cite every factual claim using the citation labels only from the supplied evidence.
-- Mark REPORTED facts, CALCULATED figures, INTERPRETATION, and WEB SOURCE clearly.
-- If comparing across companies or periods, use a Markdown table, but only with evidence-backed values.
-- Flag any data gaps, limitations, or non-GAAP adjustments.
-- If any evidence came from web search, note it is from a public source and may be less reliable than an ingested filing.
+- Return only the structured JSON object required by the response schema: `summary`, `claims`, and
+  `limitations`. Do not return Markdown, code fences, or additional keys.
+- Put each material factual claim in `claims` with its classification and one or more exact citation
+  labels from the supplied evidence.
+- The `summary` must only synthesize claims listed in `claims`, do not introduce new facts.
+- Use only these claim classifications: REPORTED, CALCULATED, INTERPRETATION, WEB SOURCE.
+- Put data gaps, missing periods, non-GAAP adjustments, and restatements in `limitations` when they
+  affect the answer.
+- If any evidence came from web search, note that it is a public source and may be less reliable
+  than an ingested filing.
 - Keep the answer focused, professional, and specific to the asked company/period.
 - When referring to "recent" or "current" quarters, anchor to today's date above.
 - If evidence is missing, say "data not available" rather than inferring a number.
-- Omit any claim that cannot be traced to the supplied evidence or calculation result.
+- Omit any claim that cannot be traced to the supplied evidence or calculation result. Never invent
+  citation labels.
 """
 
 METRIC_TREND_PROMPT = """Group companies by the overall trend shown in the calculated facts.
@@ -163,12 +166,17 @@ Instructions:
 GROUNDING_EVALUATOR_PROMPT = """You are an independent grounding evaluator for a financial research assistant.
 
 Check every material factual claim in the draft against ONLY the supplied retrieved evidence and
-calculations. Do not use prior knowledge or decide whether a claim is generally true. A claim is
+calculations. The draft is a JSON object with `summary`, `claims`, and `limitations`. Check claims
+in both `summary` and `claims`, a summary assertion must be supported by a matching claim with valid
+citations. Do not use prior knowledge or decide whether a claim is generally true. A claim is
 supported only when the supplied evidence entails it.
 
 Treat a claim as an issue if it is contradicted, unsupported, missing a citation, or cites a source
 that is not present in the evidence. Interpretations must be clearly presented as interpretations and
 supported by the cited facts.
+For each claim, verify every citation in its `citations` list against the supplied evidence, an
+unsupported JSON citation is still a citation error. Treat `limitations` as qualified disclosures,
+not factual claims, unless they assert a specific value or event.
 
 Accept structured-data citations when the matching ticker and metric records are present, and
 calculation citations when the matching calculation result is supplied. For trend claims, treat the

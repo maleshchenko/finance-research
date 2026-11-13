@@ -45,7 +45,13 @@ class ResearchRequest(BaseModel):
 
 
 class ResearchResponse(BaseModel):
-    answer: str
+    answer: str = Field(
+        ...,
+        description=(
+            "JSON-serialized answer object with summary, claims, and limitations; "
+            "parse this string as JSON to access the structured answer."
+        ),
+    )
     classification: Optional[str]
     citations: list[str]
     grounding_status: Optional[str] = Field(
@@ -58,7 +64,7 @@ class ResearchResponse(BaseModel):
     )
     unverified_draft: Optional[str] = Field(
         None,
-        description="Rejected draft, provided only when grounding review fails",
+        description="Rejected JSON-formatted answer, provided only when grounding review fails",
     )
     evidence_sources: list[str] = Field(
         default_factory=list,
