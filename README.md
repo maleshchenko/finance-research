@@ -101,9 +101,6 @@ docker compose --profile ollama up --build
 
 ### Output
 
-The transcript below documents the previous Markdown answer format; current clients
-should parse `answer` as JSON as described above.
-
 ```
 curl -s -X POST http://localhost:8000/research/query \
   -H "Content-Type: application/json" \
