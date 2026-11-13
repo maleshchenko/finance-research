@@ -1,7 +1,7 @@
 """Evaluate narrative retrieval against labeled evidence from the demo corpus.
 
 Run after starting PostgreSQL, applying migrations, and ingesting the demo data:
-    python scripts/eval_rag.py
+    python -m scripts.eval_rag
 """
 
 from __future__ import annotations

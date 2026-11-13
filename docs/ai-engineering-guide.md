@@ -65,7 +65,7 @@ seed the synthetic reports. Then:
 docker compose logs -f --tail=100 api
 
 # Run the retrieval benchmark against the configured database and embedder
-python scripts/eval_rag.py --k 8
+python -m scripts.eval_rag --k 8
 ```
 
 Inspect API contracts and responses at <http://localhost:8000/docs>.
@@ -81,7 +81,8 @@ using the scores to make broader quality claims.
 Make one change at a time, keep the corpus and embedding model fixed, and record
 both the metric and the qualitative failures you observe.
 
-1. **Top-k tradeoff:** run `scripts/eval_rag.py --k 4`, `--k 8`, and `--k 12`.
+1. **Top-k tradeoff:** compare `python -m scripts.eval_rag --k 4`,
+   `python -m scripts.eval_rag --k 8`, and `python -m scripts.eval_rag --k 12`.
    Compare Recall@k and MRR@k. More context can improve recall but also adds
    irrelevant evidence and synthesis cost.
 2. **Chunking:** vary `CHUNK_SIZE` and `CHUNK_OVERLAP` in configuration, re-ingest

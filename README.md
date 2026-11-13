@@ -367,7 +367,7 @@ After applying migrations and ingesting the demo reports, run the labeled
 retrieval benchmark:
 
 ```bash
-python scripts/eval_rag.py --k 8
+python -m scripts.eval_rag --k 8
 ```
 
 It reports macro Recall@k and MRR@k for evidence-labeled guidance and narrative
