@@ -26,7 +26,6 @@ from typing import Optional
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.database.models import (
     Document,
     DocumentChunk,

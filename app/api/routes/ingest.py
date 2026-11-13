@@ -11,7 +11,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import IngestRequest, IngestResponse
+from app.api.schemas import IngestResponse
 from app.config import settings
 from app.database.models import DocumentType
 from app.database.session import get_db

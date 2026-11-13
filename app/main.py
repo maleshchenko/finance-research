@@ -233,8 +233,6 @@ async def coverage():
     tickers = sorted({r["ticker"] for r in documents if r["ticker"]})
     gaps = []
     for ticker in tickers:
-        ticker_docs = [d for d in documents if d["ticker"] == ticker]
-        periods = {(d["fiscal_year"], d["fiscal_quarter"]) for d in ticker_docs}
         ticker_metrics = metrics.get(ticker, {})
         if not ticker_metrics:
             gaps.append(f"{ticker}: no structured metrics extracted")
