@@ -99,7 +99,7 @@ docker compose --profile ollama up --build
 # 4. Same seed + query commands as above
 ```
 
-### Historical text-form output (before the structured-answer API)
+### Output
 
 The transcript below documents the previous Markdown answer format; current clients
 should parse `answer` as JSON as described above.
